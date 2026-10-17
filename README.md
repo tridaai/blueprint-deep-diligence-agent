@@ -131,6 +131,26 @@ is accountable for lives in our code around it:
   `GET /api/cases/{id}/verification`. The analyst can send a
   quarantined claim back for re-investigation or drop it — there is
   no action that approves one into the report.
+- **Conflicts, surfaced and never resolved away.** The verifier
+  judges each claim against its own evidence; it cannot see two
+  claims side by side. So after verification, a deterministic pass
+  keys the supported claims by (entity, metric, period) — the key
+  extracted in code from each claim, with periods normalised to the
+  year — and where two claims assert different values for the same
+  key, it creates a stored **conflict record**: both claims, both
+  values verbatim, their evidence, and each side's source class
+  (primary sources — filings and official reports — rank above
+  secondary ones such as press coverage and vendor marketing; for
+  same-period facts the later-dated source is marked more recent).
+  The draft gains a Conflicts section generated from the records,
+  and the records are queryable at `GET /api/cases/{id}/conflicts`.
+  Nothing in the pipeline suppresses, merges, or silently prefers
+  either side, and the desk takes no position on which value is
+  true. The analyst's only move is to mark a conflict **NOTED** with
+  a note; the record and its section stay in the report permanently.
+  Facts from different periods are different keys and never
+  conflict; the same value from two sources is corroboration, and
+  its claims sit together on one side of the record.
 - **The report gate.** The draft is final only when an analyst
   approves it — and approval first re-verifies the citation ledger
   against the evidence store. If a cited item's bytes no longer hash
@@ -167,14 +187,23 @@ offline model and grades:
   mentions); both must be quarantined, with the expected reasons,
   and **unsupported claims in final reports must be 0** across
   every pack
+- **Conflict detection** — every pack plants a contradiction
+  between documents; each must yield exactly one conflict record
+  carrying both gold values, and no pack may yield any other
+  conflict (period-distinct facts are graded as non-conflicts)
 
 Current results (offline stub): recall **1.000** on all four cases,
 citation completeness and correctness **1.000**, budgets compliant;
 the verifier checks 43 claims across the packs, quarantines exactly
 the two poisoned findings, and final reports carry **0** unsupported
-claims. The pytest suite (39 tests) covers the gates, the budget
-caps, the evidence backend, the citation rules, the ledger's drift
-gate, and the verifier and quarantine separately.
+claims. Each pack's planted contradiction yields exactly its one
+conflict record — $412M vs $421M (Helvion revenue), 1,150 vs 1,300
+(Copperline headcount), 25 vs 41 minutes (Selene result time),
+$186M vs $171M (Aster revenue, audited filing against its stale
+preliminary release) — and no other conflicts. The pytest suite
+(52 tests) covers the gates, the budget caps, the evidence backend,
+the citation rules, the ledger's drift gate, the verifier and
+quarantine, and conflict detection and handling separately.
 
 ## Production profile
 
@@ -196,9 +225,12 @@ development profile needs none of it: SQLite at `./data/diligence.db`
 - The evidence universe is the case corpus. Web fetch is deliberately
   not wired in this round; sources enter a case only through
   ingestion, with provenance attached.
-- Contradictions are planted in the corpus and both sides surface as
-  findings; explicit conflict records in the report are a later
-  round, as is harness-profile promotion. The verifier checks
+- Contradictions are planted in the corpus and surface as conflict
+  records, but detection is only as wide as the governed metric
+  lexicon in `conflicts.py`: a disagreement stated without a
+  recognised metric, figure, or comparable value will sit in the
+  report as two findings and not be flagged. Harness-profile
+  promotion is a later round. The verifier checks
   figures, dates, and named entities against cited text — it does
   not judge narrative plausibility, and its optional model check is
   advisory only.
@@ -225,6 +257,9 @@ src/deep_diligence/
   verifier.py     the independent verifier: re-checks every claim
                   against its cited evidence bytes; quarantines
                   unsupported claims before the report gate
+  conflicts.py    conflict detection: keys supported claims by
+                  (entity, metric, period) and records where they
+                  assert different values, with source classes
   composer.py     deterministic report assembly from findings
   corpus.py       the bundled evidence corpus (generated for this
                   blueprint) and the gold case packs

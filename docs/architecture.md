@@ -31,6 +31,7 @@ it, so they hold for any model the harness runs.
 | Composer | `composer.py` | Deterministic report assembly from findings; re-renders the draft from supported claims after verification |
 | Ledger | `ledger.py` | Citation ledger: claim→evidence entries with citation-time hashes; re-verification |
 | Verifier | `verifier.py` | Independent claim re-check: reads evidence bytes from the object store and re-derives support; quarantines unsupported claims |
+| Conflicts | `conflicts.py` | Deterministic keying of supported claims by (entity, metric, period); conflict records with both sides, source classes, and recency labels |
 | Store | `store.py` | Case store port: SQLite (local) / PostgreSQL (production) |
 | Objects | `objects.py` | Object-store port: local dir / S3-compatible |
 | Corpus | `corpus.py` | Generated evidence corpus + gold case packs |
@@ -91,7 +92,31 @@ draft and lands in `BUDGET_EXHAUSTED`; the report gate still applies.
    claim are *send back for re-investigation* — the case returns to
    APPROVED with the note in the audit trail — or *drop it*. There
    is no path that approves a quarantined claim into the report.
-6. **Report gate.** An analyst approves or rejects. Approval first
+6. **Conflict detection.** Verification judges claims one at a time;
+   disagreement is a relation between claims, so it is detected by a
+   separate deterministic pass over the supported claims. Each claim
+   is reduced to assertions — (metric, period, value) — extracted in
+   code: a governed metric lexicon finds the metric mentions, figures
+   are typed (money / percent / count) and assigned to the nearest
+   mentioned metric of their type, and each figure takes the period
+   stated nearest it, normalised to the year (FY2025 and 2025 are
+   the same period; FY2024 is a different one — period-distinct
+   facts are different keys and never conflict). Where two supported
+   claims assert different values for the same (entity, metric,
+   period), a **conflict record** is stored holding both sides: the
+   claims, their evidence, both values verbatim, each side's source
+   class applied in code from the evidence kind (primary — filings,
+   regulatory notes, official reports — ranks above secondary —
+   news-style coverage, vendor product and pricing material), and a
+   more-recent marker on the side resting on the later-dated
+   document. The composer renders a Conflicts section from the
+   records. The labels are context, not resolution: no side is
+   suppressed, merged, or preferred, and the same value asserted by
+   two sources is corroboration — its claims sit together on one
+   side. The analyst's only move is to mark the conflict **NOTED**
+   with a note, which re-renders into the report; there is no
+   delete or resolve path.
+7. **Report gate.** An analyst approves or rejects. Approval first
    re-verifies the ledger: every cited item's current bytes must
    hash to the value recorded at citation time. A mismatch means the
    evidence changed after the fact — the report is flagged
@@ -129,11 +154,12 @@ live in the object store.
 Payload-JSON tables, Postgres and SQLite variants of the same schema
 (numbered migrations in `migrations/` and `migrations/sqlite/`):
 `cases`, `plans` (versioned), `evidence`, `findings`, `reports`,
-`citation_ledger`, `verifier_reports`, `quarantine`, `case_files`,
-`audit`. The audit trail records case creation,
+`citation_ledger`, `verifier_reports`, `quarantine`, `conflicts`,
+`case_files`, `audit`. The audit trail records case creation,
 evidence ingestion, plan generation and decisions, sub-agent spawns,
 budget events, composition, verification and quarantine events,
-evidence-drift detections, and report decisions.
+conflict detections and NOTED decisions, evidence-drift detections,
+and report decisions.
 
 ## Models
 
@@ -148,14 +174,18 @@ the audit trail plus structured JSON logs with request IDs.
 
 ## Deliberate limits of this round
 
-- Contradictions are planted in the corpus and both sides surface as
-  findings; explicit conflict records in the report are a later round.
+- Conflict detection is only as wide as the governed metric
+  lexicon: a disagreement stated without a recognised metric,
+  figure, or comparable value sits in the report as two findings and
+  is not flagged as a conflict.
 - Web fetch is not wired; the evidence universe is the case corpus.
 - The verifier checks what the cited evidence *says* only in the
   deterministic sense: figures, dates, and named entities present in
   the text. It does not judge narrative plausibility or reconcile
-  conflicting sources — contradictions surface as paired findings
-  (previous bullet), and a claim whose figure matches a *stale*
-  cited document passes the verifier while failing the eval pack's
-  citation-correctness grading. The optional model check is
-  advisory and recorded; it is never the gate.
+  conflicting sources — reconciliation is the conflict pass's job
+  only in the sense of surfacing the disagreement as a record; the
+  system never decides which side is true. A claim whose figure
+  matches a *stale* cited document passes the verifier while
+  failing the eval pack's citation-correctness grading. The
+  optional model check is advisory and recorded; it is never the
+  gate.
