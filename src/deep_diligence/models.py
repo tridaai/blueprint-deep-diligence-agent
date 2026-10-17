@@ -189,6 +189,29 @@ class DeleteCaseIn(BaseModel):
     reason: str = Field(min_length=1, max_length=2000)
 
 
+class AssignIn(BaseModel):
+    """Assigning a case is a recorded act: who made the
+    assignment is on the record beside who received it. An empty
+    assignee returns the case to the unassigned pool."""
+    analyst: str = Field(min_length=1, max_length=120)
+    assignee: str = Field(default="", max_length=120)
+
+
+class PriorityIn(BaseModel):
+    analyst: str = Field(min_length=1, max_length=120)
+    priority: Literal["normal", "high", "urgent"]
+
+
+class WorkbenchViewIn(BaseModel):
+    """A saved queue filter. The filter keys are the workbench's
+    own (act, assignee, priority); unknown keys are refused by
+    the service, so a saved view can never drift into meaning
+    something the queue does not understand."""
+    analyst: str = Field(min_length=1, max_length=120)
+    name: str = Field(min_length=1, max_length=120)
+    filters: dict[str, Any] = Field(default_factory=dict)
+
+
 class ProfileEvaluateIn(BaseModel):
     candidate_id: str = Field(min_length=1, max_length=120)
     analyst: str = Field(min_length=1, max_length=120)
@@ -204,12 +227,21 @@ class ProfileRollbackIn(BaseModel):
     note: str = Field(default="", max_length=2000)
 
 
+PRIORITIES = ("normal", "high", "urgent")
+
+
 class CaseOut(BaseModel):
     case_id: str
     status: str
     subject: str
     subject_ref: str
     analyst: str
+    # Analyst workbench triage: who currently owns the case at the
+    # desk, and how hard it should pull attention. Triage only —
+    # neither field gates anything; every decision stays one case,
+    # one analyst, made on the case itself.
+    assignee: str | None = None
+    priority: str = "normal"
     brief: dict[str, Any]
     usage: dict[str, Any] = Field(default_factory=dict)
     # Long-case continuity: workstreams marked stale by evidence

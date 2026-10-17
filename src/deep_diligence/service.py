@@ -50,7 +50,7 @@ from .governance import (
 from .harness import build_agent, execute_message, plan_message
 from .ledger import verify_ledger
 from .llm import build_model
-from .models import BudgetIn, BriefIn
+from .models import PRIORITIES, BudgetIn, BriefIn
 from .objects import ObjectStore, build_object_store, sha256_hex
 from .profiles import ProfileError, load_profile
 from .promotion import ProfileGate
@@ -59,6 +59,8 @@ from .schedule import build_handoff, plan_defects, waves, workstream_dependencie
 from .store import Store, build_store, utcnow
 from .tools import build_case_tools
 from .verifier import verify_case
+from .workbench import build_queue, build_timeline, validate_filters
+from .workbench import search_cases as _search_cases
 
 log = logging.getLogger("deep_diligence.service")
 
@@ -290,6 +292,12 @@ class CaseService:
             "subject": brief.subject,
             "subject_ref": brief.subject_ref,
             "analyst": brief.analyst,
+            # Analyst workbench triage (R12): the desk's current
+            # owner of the case, and how hard it should pull
+            # attention. Both start unset/default; setting either
+            # is a recorded act, and neither gates anything.
+            "assignee": None,
+            "priority": "normal",
             "brief": brief.model_dump(),
             "usage": {},
             # Long-case continuity (R9): workstreams that evidence
@@ -2183,3 +2191,109 @@ class CaseService:
         return self.store.update_case(
             case_id, status="FINAL" if approve else "REPORT_REJECTED"
         )
+
+    # -- analyst workbench ----------------------------------------------------
+    def assign_case(self, case_id: str, analyst: str, assignee: str) -> dict:
+        """Record who at the desk currently owns this case.
+
+        Assignment is triage, not authority: it orders and
+        filters the workbench queue, and it confers no decision
+        rights — every gate still takes any analyst's individual
+        decision on the case itself. The act is recorded (who
+        assigned, to whom, what it replaced); an empty assignee
+        returns the case to the unassigned pool."""
+        case = self._require_case(case_id)
+        new = (assignee or "").strip() or None
+        previous = case.get("assignee")
+        case = self.store.update_case(case_id, assignee=new)
+        self.store.add_audit(
+            case_id,
+            "case_assigned",
+            {"analyst": analyst, "assignee": new, "previous": previous},
+        )
+        log.info("case %s assigned to %s by %s", case_id, new, analyst)
+        return case
+
+    def set_priority(self, case_id: str, analyst: str, priority: str) -> dict:
+        """Set the case's triage priority (normal / high /
+        urgent). A recorded act, like assignment — and, like
+        assignment, it changes no gate, budget, or decision rule;
+        it tells the desk what to pick up first."""
+        case = self._require_case(case_id)
+        if priority not in PRIORITIES:
+            raise ValueError(
+                f"unknown priority {priority!r}; "
+                f"priorities are: {', '.join(PRIORITIES)}"
+            )
+        previous = case.get("priority") or "normal"
+        case = self.store.update_case(case_id, priority=priority)
+        self.store.add_audit(
+            case_id,
+            "case_priority_set",
+            {"analyst": analyst, "priority": priority, "previous": previous},
+        )
+        log.info("case %s priority %s by %s", case_id, priority, analyst)
+        return case
+
+    def workbench_queue(self, filters: dict | None = None) -> dict:
+        """The desk's queue: every case needing an analyst act,
+        grouped by the act, derived from the records (see
+        workbench.py). Building it runs the interrupted-case scan,
+        because listing is that scan's detection point — a case a
+        dead process stranded belongs in the queue the first time
+        anyone looks."""
+        return build_queue(
+            self.store, self.interrupted_cases(), filters=filters
+        )
+
+    def case_timeline(self, case_id: str) -> list[dict]:
+        """The case's story in one chronological view: the audit
+        trail merged with the analyst's notes (enriched with
+        their text), rendered from the records."""
+        self._require_case(case_id)
+        return build_timeline(self.store, case_id)
+
+    def search_cases(self, query: str) -> list[dict]:
+        """Deterministic text search over subjects, brief
+        questions, and finding claims (see workbench.py)."""
+        return _search_cases(self.store, query)
+
+    def save_view(self, analyst: str, name: str, filters: dict) -> dict:
+        """Save a queue filter under the analyst's name.
+
+        Saving under a name the analyst already holds replaces
+        that view's filters — a view is a working shortcut, not a
+        record of anything decided. The filter set is validated
+        against the workbench's own keys, so a view can never name
+        a filter the queue would not understand."""
+        cleaned = validate_filters(filters)
+        if not (name or "").strip():
+            raise ValueError("a saved view needs a name")
+        existing = self.store.find_view(analyst, name.strip())
+        now = utcnow()
+        if existing is not None:
+            existing["filters"] = cleaned
+            existing["updated_at"] = now
+            return self.store.update_view(existing)
+        return self.store.add_view(
+            {
+                "analyst": analyst,
+                "name": name.strip(),
+                "filters": cleaned,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+
+    def list_views(self, analyst: str | None = None) -> list[dict]:
+        return self.store.list_views(analyst)
+
+    def delete_view(self, analyst: str, view_id: str) -> dict:
+        """Remove one of the analyst's own saved views. Only the
+        view goes — no case, queue item, or decision is touched,
+        because a view never held any of those."""
+        view = self.store.get_view(view_id)
+        if view is None or view["analyst"] != analyst:
+            raise KeyError(view_id)
+        self.store.delete_view(view_id)
+        return view
