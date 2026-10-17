@@ -28,8 +28,9 @@ it, so they hold for any model the harness runs.
 | Tools | `tools.py` | `search_corpus`, `read_document`, `record_finding` (citation rule) |
 | Backend | `backend.py` | Deep Agents filesystem protocol over the evidence store |
 | Evidence | `evidence.py` | Corpus ingestion: IDs, source, hash, retrieval time |
-| Composer | `composer.py` | Deterministic report assembly from findings |
+| Composer | `composer.py` | Deterministic report assembly from findings; re-renders the draft from supported claims after verification |
 | Ledger | `ledger.py` | Citation ledger: claim→evidence entries with citation-time hashes; re-verification |
+| Verifier | `verifier.py` | Independent claim re-check: reads evidence bytes from the object store and re-derives support; quarantines unsupported claims |
 | Store | `store.py` | Case store port: SQLite (local) / PostgreSQL (production) |
 | Objects | `objects.py` | Object-store port: local dir / S3-compatible |
 | Corpus | `corpus.py` | Generated evidence corpus + gold case packs |
@@ -73,7 +74,24 @@ draft and lands in `BUDGET_EXHAUSTED`; the report gate still applies.
    bytes at citation time, read live from the object store. The
    report's References section is generated from the ledger. The
    composer — never the model — writes the report.
-5. **Report gate.** An analyst approves or rejects. Approval first
+5. **Verification.** Before the draft reaches the analyst, the
+   verifier re-checks every claim against the evidence it cites. It
+   is independent by construction: it re-reads the persisted report
+   and fetches each cited item's bytes directly from the object
+   store, never touching the composer's structures or the citation
+   ledger. The gate checks are deterministic — every figure and date
+   a claim states must appear in its cited evidence, and every named
+   entity it mentions must be mentioned there; when a real model is
+   configured, an advisory model check (claim + evidence only, no
+   other context) is recorded alongside, but never decides. A claim
+   that fails is **quarantined**: removed from the report body (the
+   composer re-renders from the supported claims and rebuilds the
+   ledger), recorded with its reason, and summarised in the draft's
+   Verification section. The analyst's only moves on a quarantined
+   claim are *send back for re-investigation* — the case returns to
+   APPROVED with the note in the audit trail — or *drop it*. There
+   is no path that approves a quarantined claim into the report.
+6. **Report gate.** An analyst approves or rejects. Approval first
    re-verifies the ledger: every cited item's current bytes must
    hash to the value recorded at citation time. A mismatch means the
    evidence changed after the fact — the report is flagged
@@ -111,9 +129,11 @@ live in the object store.
 Payload-JSON tables, Postgres and SQLite variants of the same schema
 (numbered migrations in `migrations/` and `migrations/sqlite/`):
 `cases`, `plans` (versioned), `evidence`, `findings`, `reports`,
-`citation_ledger`, `case_files`, `audit`. The audit trail records case creation,
+`citation_ledger`, `verifier_reports`, `quarantine`, `case_files`,
+`audit`. The audit trail records case creation,
 evidence ingestion, plan generation and decisions, sub-agent spawns,
-budget events, composition, evidence-drift detections, and report decisions.
+budget events, composition, verification and quarantine events,
+evidence-drift detections, and report decisions.
 
 ## Models
 
@@ -131,9 +151,11 @@ the audit trail plus structured JSON logs with request IDs.
 - Contradictions are planted in the corpus and both sides surface as
   findings; explicit conflict records in the report are a later round.
 - Web fetch is not wired; the evidence universe is the case corpus.
-- The verifier pass (independent claim re-check by a second agent)
-  is a later round; the citation defence today is record-time
-  enforcement, composer re-verification, and the ledger's
-  deterministic hash re-verification at the report gate — none of
-  which re-reads a claim against its evidence for *meaning*, only
-  for presence, resolution, and byte identity.
+- The verifier checks what the cited evidence *says* only in the
+  deterministic sense: figures, dates, and named entities present in
+  the text. It does not judge narrative plausibility or reconcile
+  conflicting sources — contradictions surface as paired findings
+  (previous bullet), and a claim whose figure matches a *stale*
+  cited document passes the verifier while failing the eval pack's
+  citation-correctness grading. The optional model check is
+  advisory and recorded; it is never the gate.

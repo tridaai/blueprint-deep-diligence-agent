@@ -111,6 +111,26 @@ is accountable for lives in our code around it:
   findings recorded so far survive, and the composer produces a
   partial report that names the questions it did not cover instead
   of truncating silently.
+- **Independent verification, before the gate.** A citation can
+  resolve and still not support the claim — the figure can be
+  overstated, the entity absent. So after composition, a verifier
+  re-checks every claim against the evidence it cites. It is
+  independent by construction: it re-reads the persisted report and
+  fetches each cited item's bytes directly from the object store,
+  never the composer's working set or the citation ledger (delete
+  the ledger and its verdicts do not change). The checks are
+  deterministic — every figure and date in a claim must appear in
+  its cited evidence, and every named entity must be mentioned
+  there. With a real model configured, an advisory model check
+  (claim and evidence only) is recorded beside them, but the
+  deterministic checks decide. A claim that fails is **quarantined**:
+  removed from the report body, recorded with its reason
+  (`figure_not_in_evidence`, `entity_mismatch`,
+  `evidence_missing`, …), and summarised in the draft's Verification
+  section, the console's quarantine panel, and
+  `GET /api/cases/{id}/verification`. The analyst can send a
+  quarantined claim back for re-investigation or drop it — there is
+  no action that approves one into the report.
 - **The report gate.** The draft is final only when an analyst
   approves it — and approval first re-verifies the citation ledger
   against the evidence store. If a cited item's bytes no longer hash
@@ -141,12 +161,20 @@ offline model and grades:
 - **Citation correctness** — every figure a claim states must appear
   in the evidence it cites — gate 100%
 - **Budget compliance** — every run finishes inside its caps
+- **Verifier quarantine** — the integrity pack also injects two
+  poisoned findings (a revenue figure overstated against its cited
+  filing, and a claim naming an entity its cited document never
+  mentions); both must be quarantined, with the expected reasons,
+  and **unsupported claims in final reports must be 0** across
+  every pack
 
 Current results (offline stub): recall **1.000** on all four cases,
-citation completeness and correctness **1.000**, budgets compliant.
-The pytest suite (30 tests) covers the gates, the budget caps, the
-evidence backend, the citation rules, and the ledger's drift gate
-separately.
+citation completeness and correctness **1.000**, budgets compliant;
+the verifier checks 43 claims across the packs, quarantines exactly
+the two poisoned findings, and final reports carry **0** unsupported
+claims. The pytest suite (39 tests) covers the gates, the budget
+caps, the evidence backend, the citation rules, the ledger's drift
+gate, and the verifier and quarantine separately.
 
 ## Production profile
 
@@ -170,8 +198,10 @@ development profile needs none of it: SQLite at `./data/diligence.db`
   ingestion, with provenance attached.
 - Contradictions are planted in the corpus and both sides surface as
   findings; explicit conflict records in the report are a later
-  round, as are the independent verifier pass and harness-profile
-  promotion.
+  round, as is harness-profile promotion. The verifier checks
+  figures, dates, and named entities against cited text — it does
+  not judge narrative plausibility, and its optional model check is
+  advisory only.
 - Budgets cap each run (planning and execution are guarded
   separately) rather than the case as a whole.
 - LangSmith is not required anywhere. Tracing is the audit trail plus
@@ -192,6 +222,9 @@ src/deep_diligence/
   evidence.py     corpus ingestion with IDs, sources, hashes
   ledger.py       the citation ledger: claim→evidence record with
                   citation-time hashes, re-verified at the gate
+  verifier.py     the independent verifier: re-checks every claim
+                  against its cited evidence bytes; quarantines
+                  unsupported claims before the report gate
   composer.py     deterministic report assembly from findings
   corpus.py       the bundled evidence corpus (generated for this
                   blueprint) and the gold case packs
