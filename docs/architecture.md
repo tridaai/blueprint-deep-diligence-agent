@@ -28,6 +28,7 @@ it, so they hold for any model the harness runs.
 | Evaluation | `evaluation.py` | The case-pack grading (recall, citation, correctness, quarantine, conflicts), shared by the eval runner and the promotion gate |
 | Promotion gate | `promotion.py` | Split evaluation, worst-of-three verdicts against the incumbent's recorded baseline, file-hash evidence, append-only promotion/rollback records |
 | Budgets | `budgets.py` | Callback guard + budget ledger: per-phase step/token caps, case-level spawn/wall caps, grant/consume/exhaust/amend entries folded from the audit trail |
+| Schedule | `schedule.py` | Workstream dependencies: plan-gate graph validation, topological waves, and the findings handoff a dependent starts from |
 | Tools | `tools.py` | `search_corpus`, `read_document`, `record_finding` (citation rule) |
 | Backend | `backend.py` | Deep Agents filesystem protocol over the evidence store |
 | Evidence | `evidence.py` | Corpus ingestion: IDs, source, hash, retrieval time |
@@ -66,13 +67,15 @@ consumed), which returns the case to `APPROVED` for re-execution.
    stored as a versioned artifact. Nothing else can happen until an
    analyst approves it — the state machine refuses execution from any
    other state.
-3. **Execution.** The planner delegates each workstream via the `task`
-   tool to a specialist sub-agent (financial-scan, product-scan,
-   market-scan) with an isolated context. Sub-agents search the case
-   evidence, read documents, and record findings through
-   `record_finding`, which refuses a claim without a valid evidence
-   ID. Findings land directly in the case store, so a stopped run
-   keeps what it found.
+3. **Execution.** The service computes the approved plan's schedule
+   (see "Parallel workstreams" below) and runs one harness run per
+   wave; inside a run, the planner delegates the wave's workstreams
+   via the `task` tool to specialist sub-agents (financial-scan,
+   product-scan, market-scan) with isolated contexts. Sub-agents
+   search the case evidence, read documents, and record findings
+   through `record_finding`, which refuses a claim without a valid
+   evidence ID. Findings land directly in the case store, so a
+   stopped run keeps what it found.
 4. **Composition.** Deterministic code groups findings by question,
    re-verifies every citation against the case evidence (a claim that
    fails is refused and named), and renders the draft. Each composed
@@ -170,10 +173,13 @@ the report's claims and the plan's workstream mapping: ANSWERED
 (findings exist, but the run stopped mid-workstream — the guard
 tracks which `task` calls were still open when the cap tripped,
 and the service maps those spawns back to questions through the
-plan's workstream order), or NOT COVERED (no findings recorded).
-The banner names the exhausted cap and phase; the table rides on
-the report record as `coverage_detail`. Approving a partial report
-stamps that table onto the approval record.
+tripped wave's workstream order), or NOT COVERED (no findings
+recorded). The banner names the exhausted cap and phase; the table
+rides on the report record as `coverage_detail`. Approving a
+partial report stamps that table onto the approval record. The
+same table — outside the partial protocol, with the reason named
+on each uncovered row — appears on a completed run whose
+workstreams did not all complete (see below).
 
 **Amendment.** From `BUDGET_EXHAUSTED` only, an analyst may amend
 the budget with a recorded reason. The service refuses any cap set
@@ -183,6 +189,70 @@ records the amendment (analyst, reason, previous and amended
 budgets) as a ledger entry and returns the case to `APPROVED`. The
 original exhaustion is never removed; grant, exhaustion,
 amendment, and the completing run's consumption read in order.
+
+## Parallel workstreams
+
+Workstreams fan out in parallel, but the fan-out is scheduled, not
+improvised (`schedule.py`). A plan workstream may declare
+`depends_on` — the question ids whose workstreams must finish
+before it starts — carried from the brief onto the plan artifact by
+the planner.
+
+**The gate validates the graph.** `decide_plan` runs the plan's
+dependency graph through `plan_defects` before approval: an
+unknown dependency, a self-dependency, or a cycle (named as a path,
+`q1 -> q2 -> q1`) refuses approval with the defect in the message,
+and the plan stays at the gate. Execution re-checks the graph
+before scheduling it, so an unschedulable plan can never run.
+
+**Waves.** Execution computes topological layers of the graph:
+wave 1 is every workstream with no unmet dependencies, and a
+workstream enters a later wave only when all its prerequisites sit
+in earlier waves. The service invokes one harness run per wave,
+with that wave's workstreams as the run's whole plan. A dependent
+workstream therefore cannot be spawned early — the run that would
+spawn it has not been invoked — and inside a wave the workstreams
+run as the harness's parallel fan-out with isolated contexts, as
+before. A plan with no dependencies is a single wave, which is the
+execution this blueprint always had. Start and finish are audit
+events per workstream (`workstream_started` /
+`workstream_finished`), and `execution_started` records the wave
+layout, so the schedule is provable from the trail after the fact.
+
+**Handoff.** When a wave is assembled, each dependent workstream
+receives exactly its prerequisites' recorded findings — claim,
+evidence IDs, fact ref, verbatim — attached to its plan entry as
+`prior_findings` and passed by the planner into the sub-agent's
+task description under a PRIOR FINDINGS heading. The audit records
+the handoff (`workstream_handoff`: dependent, prerequisites, the
+finding ids carried). Nothing else crosses between workstreams: no
+transcripts, no scratch. Isolation is the default; the handoff is
+the one declared exception.
+
+**Statuses and failure isolation.** Every workstream ends an
+execution with a status on the report record (and at
+`GET /api/cases/{id}/workstreams`): `completed` (findings in the
+record), `empty` (ran, recorded none), `failed` (its wave's run
+raised and it recorded none; the error is the reason),
+`interrupted` (a budget stop inside it), or `not_run` (a budget
+stop before it). If a wave's run raises, the wave's finding-less
+workstreams are marked failed with the error named, and later
+waves still run — a dependent of a failed prerequisite runs with
+whatever handoff exists, possibly none, recorded as such. The
+case still composes and drafts; the failed or empty branch's
+question appears in the report's coverage table as NOT COVERED
+with the reason, so one branch's failure is a reported fact, never
+a silent gap or a failed case.
+
+**Determinism.** Findings are stored in recording order, which
+under parallel workstreams is completion order. The composer does
+not compose in that order: it sorts the finding set by the brief's
+question order, then fact ref, then claim text, and assigns claim
+ids in that order. The report is therefore a function of what was
+found, not of who finished first — repeated executions of the same
+case compose byte-identical drafts (a test runs the dependency
+case twice in fresh stores and diffs them, and another records
+findings in scrambled order and checks the composed order).
 
 ## The virtual filesystem
 

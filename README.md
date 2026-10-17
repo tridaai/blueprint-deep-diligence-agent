@@ -92,12 +92,28 @@ is accountable for lives in our code around it:
   impossible until an analyst approves it; the lifecycle is a state
   machine in `service.py`, and the API answers out-of-order calls
   with 409.
-- **Sub-agent workstreams.** On approval, the planner delegates each
-  workstream with the harness's `task` tool to a specialist
-  (financial-scan, product-scan, market-scan) running in an isolated
-  context. Sub-agents search the case evidence and read documents
-  through the virtual filesystem, where evidence is mounted read-only
-  at `/evidence/<EV-ID>.md` — the agent cannot alter its sources.
+- **Sub-agent workstreams, run to a schedule.** On approval, the
+  planner delegates each workstream with the harness's `task` tool
+  to a specialist (financial-scan, product-scan, market-scan)
+  running in an isolated context. Sub-agents search the case
+  evidence and read documents through the virtual filesystem, where
+  evidence is mounted read-only at `/evidence/<EV-ID>.md` — the
+  agent cannot alter its sources. A workstream may declare
+  **dependencies** on other workstreams in the plan (the market
+  read needs the product facts first): the plan gate refuses an
+  unknown dependency or a cycle, with the defect named, and
+  execution runs in topological **waves** computed in code — one
+  harness run per wave, so a dependent workstream cannot be spawned
+  before its prerequisites finish. When a wave assembles, each
+  dependent receives its prerequisites' recorded findings —
+  verbatim, nothing else crosses — as starting context, and the
+  handoff is written to the audit trail. Every workstream ends with
+  a recorded status (completed, empty, failed, interrupted, not
+  run); a wave that crashes fails only its own branch, the other
+  waves still run, and the case composes with the failure named in
+  its coverage table. The composer orders claims by plan, not by
+  completion order, so repeated executions of a case produce the
+  same draft.
 - **Citations, enforced at every step.** `record_finding` refuses a
   claim with no valid evidence ID. The report composer re-verifies
   every citation while assembling the draft — a claim whose evidence
@@ -256,6 +272,15 @@ offline model and grades:
   names at least one NOT COVERED question, no cap may be violated,
   an amendment below consumption must be refused, and a recorded
   amendment plus re-run must reach DRAFT_READY with full recall
+- **Scheduled workstreams** — two dependency packs grade the
+  schedule itself: a brief whose market workstream depends on its
+  product workstream (the financial workstream is an independent
+  branch) must show, in the audit trail, the dependent starting
+  only after its prerequisite finished, with a handoff carrying
+  exactly the prerequisite's findings; the failure-injection
+  variant scopes the independent branch's only document out of the
+  case, and that branch must end empty — its question NOT COVERED
+  with the reason named — while the case still drafts
 
 Current results (offline stub): recall **1.000** on all four cases,
 citation completeness and correctness **1.000**, budgets compliant;
@@ -268,13 +293,20 @@ $186M vs $171M (Aster revenue, audited filing against its stale
 preliminary release) — and no other conflicts. The budget case
 exhausts on its step cap during execution, refuses a
 below-consumption amendment, and after amendment re-runs to
-DRAFT_READY with recall **1.000**. The pytest suite
-(111 tests) covers the gates, the budget caps, the evidence backend,
+DRAFT_READY with recall **1.000**. The dependency packs both pass:
+the chain's schedule and handoff grade clean at recall **1.000**,
+and the failure variant's missing branch ends empty with its
+question NOT COVERED and the reason named, the case at
+DRAFT_READY. The pytest suite
+(127 tests) covers the gates, the budget caps, the evidence backend,
 the citation rules, the ledger's drift gate, the verifier and
 quarantine, conflict detection and handling, per-phase budgets,
 the budget ledger, the partial-report protocol, amendment, the
-harness profiles, and the profile regression gate — including its
-two controls run against the real suite (below).
+harness profiles, the profile regression gate — including its
+two controls run against the real suite (below) — and the
+workstream schedule: dependency validation at the plan gate,
+waves, handoffs, failure isolation, and deterministic
+composition.
 
 The eval runner also runs the packs under any other profile —
 `python evals/run_evals.py --profile openai-gpt` — with the report
@@ -355,6 +387,8 @@ src/deep_diligence/
                   rollback records that move the active profile
   stub_model.py   the deterministic offline model
   llm.py          provider boundary (OpenAI-compatible, Anthropic, Ollama)
+  schedule.py     workstream dependencies: gate validation, waves,
+                  and the findings handoff
   budgets.py      budget guard enforced in code around the harness
   tools.py        search_corpus / read_document / record_finding
   backend.py      virtual filesystem over the evidence store
