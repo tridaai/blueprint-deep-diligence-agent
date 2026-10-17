@@ -41,6 +41,13 @@ metric, period), both sides are stated with their values verbatim
 and their source labels. The section is generated from the records,
 never hand-written, and a conflict the analyst has marked NOTED
 renders with its note — it is never removed.
+
+The Method and limits section also carries the case's staleness
+decisions (continuity.py): when evidence arrived after planning
+and an analyst proceeded without re-planning, or re-planned around
+it, the report says so — which evidence, which questions, whose
+decision — because part of the draft then predates evidence the
+reader should know about.
 """
 
 from __future__ import annotations
@@ -129,6 +136,7 @@ def _render_markdown(
     refused: list[str] | None = None,
     verification: dict | None = None,
     conflicts: list[dict] | None = None,
+    staleness_decisions: list[dict] | None = None,
 ) -> str:
     brief = case["brief"]
     lines = [
@@ -280,6 +288,29 @@ def _render_markdown(
             "composition because their evidence citations did not "
             "resolve: " + ", ".join(refused) + "."
         )
+    for decision in staleness_decisions or []:
+        evidence_ids = ", ".join(decision["evidence_ids"])
+        questions = ", ".join(decision["questions"])
+        day = (decision.get("at") or "")[:10]
+        if decision["action"] == "proceed":
+            lines.append(
+                f"New evidence arrived after planning ({evidence_ids}); "
+                f"the desk marked {questions} stale, and "
+                f"{decision['analyst']} recorded a decision to proceed "
+                f"without re-planning on {day}"
+                + (f': "{decision["note"]}"' if decision.get("note") else "")
+                + ". Those workstreams were not re-run; their findings "
+                "predate the new evidence."
+            )
+        else:
+            lines.append(
+                f"New evidence arrived after planning ({evidence_ids}); "
+                f"the desk marked {questions} stale and re-planned on "
+                f"{day} (analyst {decision['analyst']}). The marked "
+                "workstreams were re-run against the full evidence; "
+                "the others kept their findings, which rest on "
+                "evidence the arrival did not touch."
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -371,6 +402,7 @@ def compose_report(
             exceeded_phase=exceeded_phase,
             coverage_detail=coverage_detail,
             refused=refused,
+            staleness_decisions=case.get("staleness_decisions"),
         ),
         "claims": claims,
         "refused_claims": refused,
@@ -443,6 +475,7 @@ def apply_verification(
             coverage_detail=coverage_detail,
             refused=report["refused_claims"],
             verification=summary,
+            staleness_decisions=case.get("staleness_decisions"),
         ),
         "claims": claims,
         "coverage": _coverage(brief, claims),
@@ -504,6 +537,7 @@ def apply_conflicts(
             refused=report["refused_claims"],
             verification=report["verification"],
             conflicts=conflict_records,
+            staleness_decisions=case.get("staleness_decisions"),
         ),
         "conflicts": [
             {

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 
 from langchain_core.messages import HumanMessage
@@ -32,13 +33,14 @@ from .budgets import (
 from .composer import apply_conflicts, apply_verification, compose_report
 from .conflicts import detect_conflicts
 from .config import Settings
+from .continuity import stale_questions
 from .corpus import companies
-from .evidence import ingest_case_evidence
+from .evidence import add_evidence_document, ingest_case_evidence
 from .harness import build_agent, execute_message, plan_message
 from .ledger import verify_ledger
 from .llm import build_model
 from .models import BudgetIn, BriefIn
-from .objects import ObjectStore, build_object_store
+from .objects import ObjectStore, build_object_store, sha256_hex
 from .profiles import ProfileError, load_profile
 from .promotion import ProfileGate
 from .schedule import build_handoff, plan_defects, waves, workstream_dependencies
@@ -376,6 +378,17 @@ class CaseService:
             raise GateError(
                 f"execution requires an approved plan (status {case['status']})"
             )
+        stale = case.get("stale_marks") or []
+        if stale:
+            questions = ", ".join(
+                sorted({m["question_id"] for m in stale})
+            )
+            raise GateError(
+                "new evidence arrived after planning and these "
+                f"workstreams are marked stale: {questions}. An "
+                "analyst must re-plan or record a decision to "
+                "proceed before execution"
+            )
         plan = self.store.get_plan(case_id)
         plan_doc = plan.get("plan") or {}
         workstreams = plan_doc.get("workstreams", [])
@@ -386,34 +399,80 @@ class CaseService:
             raise GateError(
                 "plan cannot be executed: " + "; ".join(defects)
             )
-        schedule = waves(workstreams)
+        skip = self._reuse_skip(case, workstreams)
         backend = self._backend(case_id)
         backend.delete_direct("/execution/notes.md")
+        return self._execute(case, plan, skip=skip, resumed=False)
+
+    def _execute(
+        self,
+        case: dict,
+        plan: dict,
+        *,
+        skip: dict,
+        resumed: bool,
+        attempt: int | None = None,
+    ) -> dict:
+        """Run an approved plan's waves to a composed draft.
+
+        `skip` holds workstreams that must not run — their recorded
+        statuses are carried into the execution record instead.
+        Two callers build it: a fresh execution after a
+        staleness-driven re-plan (findings reuse, see _reuse_skip)
+        and a resume (the checkpoint's completed workstreams, see
+        resume_execution). An ordinary execution passes an empty
+        skip and behaves exactly as execution always has.
+
+        The execution writes its own checkpoint as it goes — one
+        record of per-workstream status, finding IDs, wave
+        position, and a budget snapshot folded from the ledger —
+        so if the process dies mid-run, what remains is a case in
+        EXECUTING with a checkpoint that says precisely where it
+        stopped, and resume reads that record, never harness
+        memory.
+        """
+        case_id = case["case_id"]
+        plan_doc = plan.get("plan") or {}
+        workstreams = plan_doc.get("workstreams", [])
+        schedule = waves(workstreams)
         self.store.update_case(case_id, status="EXECUTING")
-        self.store.add_audit(
-            case_id,
-            "execution_started",
-            {
-                "plan_version": plan["version"],
-                "waves": [
-                    [ws["question_id"] for ws in layer] for layer in schedule
-                ],
-            },
+        started: dict = {
+            "plan_version": plan["version"],
+            "waves": [
+                [ws["question_id"] for ws in layer] for layer in schedule
+            ],
+        }
+        if resumed:
+            started["resumed"] = True
+        if skip:
+            started["skipped"] = sorted(skip)
+        self.store.add_audit(case_id, "execution_started", started)
+        prior = self.store.get_checkpoint(case_id)
+        if attempt is None:
+            attempt = (prior or {}).get("attempt", 0) + 1
+        checkpoint = self._open_checkpoint(
+            case, plan, schedule, skip, attempt, prior
         )
-        statuses: dict[str, dict] = {}
+        statuses: dict[str, dict] = dict(skip)
         usages: list[dict] = []
         error: BudgetExceededError | None = None
         interrupted: list[str] = []
         tripped_usage: dict | None = None
         for index, layer in enumerate(schedule, start=1):
-            usage, error, layer_statuses, layer_interrupted = self._run_wave(
-                case, plan_doc, layer, index
-            )
-            usages.append(usage)
-            statuses.update(layer_statuses)
+            runnable = [
+                ws for ws in layer if ws["question_id"] not in statuses
+            ]
+            if runnable:
+                usage, error, layer_statuses, layer_interrupted = (
+                    self._run_wave(case, plan_doc, runnable, index)
+                )
+                usages.append(usage)
+                statuses.update(layer_statuses)
+                if error is not None:
+                    interrupted = layer_interrupted
+                    tripped_usage = usage
+            self._refresh_checkpoint(case_id, checkpoint, statuses)
             if error is not None:
-                interrupted = layer_interrupted
-                tripped_usage = usage
                 break
         if error is not None:
             # Waves the stop kept from ever starting: their
@@ -438,7 +497,13 @@ class CaseService:
             if ws["question_id"] in statuses
         ]
         case = self.store.update_case(
-            case_id, usage={**case.get("usage", {}), "execution": usage}
+            case_id,
+            usage={**case.get("usage", {}), "execution": usage},
+            # The reuse directive is one-shot: whichever execution
+            # it governed has now run, and the next fresh execution
+            # starts from the record as it stands then.
+            reuse_findings=False,
+            must_rerun=[],
         )
         if error is not None:
             report = compose_report(
@@ -456,6 +521,9 @@ class CaseService:
             )
             report = self._verify_draft(case, report)
             self.store.update_case(case_id, status="BUDGET_EXHAUSTED")
+            self._close_checkpoint(
+                case_id, checkpoint, statuses, "budget_exhausted"
+            )
             log.info("case %s budget exhausted (%s)", case_id, error.kind)
             return report
         report = compose_report(
@@ -466,8 +534,308 @@ class CaseService:
         )
         report = self._verify_draft(case, report)
         self.store.update_case(case_id, status="DRAFT_READY")
+        self._close_checkpoint(case_id, checkpoint, statuses, "draft_ready")
         log.info("case %s draft ready", case_id)
         return report
+
+    # -- checkpoints ------------------------------------------------------------
+    def _budget_snapshot(self, case_id: str) -> dict:
+        """The case's budget position, folded from the ledger at
+        this moment — the snapshot a checkpoint carries, so a
+        resume can show exactly what the interrupted attempt had
+        already spent."""
+        fold = fold_budget_ledger(self.store.list_audit(case_id))
+        return {
+            "case_consumed": fold["case_consumed"],
+            "phases": {
+                phase: fold["phases"][phase]["consumed"] for phase in PHASES
+            },
+        }
+
+    def _open_checkpoint(
+        self,
+        case: dict,
+        plan: dict,
+        schedule: list,
+        skip: dict,
+        attempt: int,
+        prior: dict | None,
+    ) -> dict:
+        case_id = case["case_id"]
+        recorded: dict[str, list[str]] = {}
+        for finding in self.store.list_findings(case_id):
+            recorded.setdefault(finding["question_id"], []).append(
+                finding["finding_id"]
+            )
+        workstream_state: dict[str, dict] = {}
+        for index, layer in enumerate(schedule, start=1):
+            for entry in layer:
+                qid = entry["question_id"]
+                if qid in skip:
+                    workstream_state[qid] = {
+                        "status": skip[qid]["status"],
+                        "findings": skip[qid]["findings"],
+                        "finding_ids": recorded.get(qid, []),
+                        "wave": index,
+                        "reason": skip[qid].get("reason"),
+                    }
+                else:
+                    workstream_state[qid] = {
+                        "status": "pending",
+                        "findings": len(recorded.get(qid, [])),
+                        "finding_ids": recorded.get(qid, []),
+                        "wave": index,
+                        "reason": None,
+                    }
+        started_at = utcnow()
+        if prior and prior.get("attempt") == attempt and prior.get("started_at"):
+            # A resume continues the same attempt; its clock
+            # started when the attempt did, not when it resumed.
+            started_at = prior["started_at"]
+        checkpoint = {
+            "case_id": case_id,
+            "plan_version": plan["version"],
+            "attempt": attempt,
+            "waves": [
+                [ws["question_id"] for ws in layer] for layer in schedule
+            ],
+            "workstreams": workstream_state,
+            "budget_snapshot": self._budget_snapshot(case_id),
+            "complete": False,
+            "outcome": None,
+            "started_at": started_at,
+            "updated_at": utcnow(),
+        }
+        return self.store.save_checkpoint(case_id, checkpoint)
+
+    def _refresh_checkpoint(
+        self, case_id: str, checkpoint: dict, statuses: dict
+    ) -> dict:
+        recorded: dict[str, list[str]] = {}
+        for finding in self.store.list_findings(case_id):
+            recorded.setdefault(finding["question_id"], []).append(
+                finding["finding_id"]
+            )
+        for qid, status in statuses.items():
+            entry = checkpoint["workstreams"].setdefault(qid, {"wave": None})
+            entry.update(
+                {
+                    "status": status["status"],
+                    "findings": status["findings"],
+                    "finding_ids": recorded.get(qid, []),
+                    "reason": status.get("reason"),
+                }
+            )
+        checkpoint["budget_snapshot"] = self._budget_snapshot(case_id)
+        checkpoint["updated_at"] = utcnow()
+        return self.store.save_checkpoint(case_id, checkpoint)
+
+    def _close_checkpoint(
+        self, case_id: str, checkpoint: dict, statuses: dict, outcome: str
+    ) -> dict:
+        checkpoint = self._refresh_checkpoint(case_id, checkpoint, statuses)
+        checkpoint["complete"] = True
+        checkpoint["outcome"] = outcome
+        checkpoint["updated_at"] = utcnow()
+        return self.store.save_checkpoint(case_id, checkpoint)
+
+    def _reuse_skip(self, case: dict, workstreams: list[dict]) -> dict:
+        """The findings-reuse rule for a staleness-driven re-plan.
+
+        The reuse directive is set only by replan_case, and only
+        when staleness marks named the workstreams the new
+        evidence touches. A workstream is skipped — its recorded
+        findings carried into the new execution — when ALL of
+        these hold: it is not one of the marked questions, it
+        already holds findings, and every item of evidence those
+        findings cite is still in the case with its bytes hashing
+        to the value recorded when the evidence arrived (drifted
+        evidence re-runs its workstream; nothing is reused on
+        faith). A general plan revision sets no directive and
+        re-executes in full, exactly as re-execution always has.
+        """
+        if not case.get("reuse_findings"):
+            return {}
+        case_id = case["case_id"]
+        must_rerun = set(case.get("must_rerun") or [])
+        by_question: dict[str, list[dict]] = {}
+        for finding in self.store.list_findings(case_id):
+            by_question.setdefault(finding["question_id"], []).append(finding)
+        evidence = {
+            ev["evidence_id"]: ev for ev in self.store.list_evidence(case_id)
+        }
+        skip: dict[str, dict] = {}
+        for entry in workstreams:
+            qid = entry["question_id"]
+            found = by_question.get(qid) or []
+            if qid in must_rerun or not found:
+                continue
+            unchanged = all(
+                eid in evidence
+                and sha256_hex(
+                    self.objects.get(evidence[eid]["object_key"])
+                )
+                == evidence[eid]["sha256"]
+                for finding in found
+                for eid in finding["evidence_ids"]
+            )
+            if not unchanged:
+                continue
+            skip[qid] = {
+                "question_id": qid,
+                "workstream": entry["workstream"],
+                "status": "completed",
+                "findings": len(found),
+                "reason": (
+                    "findings reused from the previous plan — the "
+                    "new evidence does not touch this workstream, "
+                    "and the evidence its findings cite is unchanged"
+                ),
+                "reused": True,
+            }
+        if skip:
+            self.store.add_audit(
+                case_id,
+                "findings_reused",
+                {
+                    "questions": sorted(skip),
+                    "must_rerun": sorted(must_rerun),
+                },
+            )
+        return skip
+
+    # -- interrupted cases: detection + resume ------------------------------------
+    def interrupted_cases(self) -> list[dict]:
+        """Cases an interrupted execution left behind: status
+        EXECUTING, checkpoint incomplete, no live run anywhere.
+
+        Detection is recorded — the first scan that finds a case
+        writes `execution_interruption_detected` to its audit
+        trail, naming the workstreams that had completed and the
+        ones still owed; later scans of the same interruption read
+        the record back without writing it again.
+        """
+        found: list[dict] = []
+        for case in self.store.list_cases():
+            if case["status"] != "EXECUTING":
+                continue
+            case_id = case["case_id"]
+            checkpoint = self.store.get_checkpoint(case_id)
+            if checkpoint is not None and checkpoint.get("complete"):
+                continue
+            plan = self.store.get_plan(case_id)
+            if plan and (plan.get("plan") or {}).get("workstreams"):
+                all_questions = [
+                    ws["question_id"]
+                    for ws in plan["plan"]["workstreams"]
+                ]
+            else:
+                all_questions = [
+                    q["id"] for q in case["brief"]["questions"]
+                ]
+            state = (checkpoint or {}).get("workstreams") or {}
+            completed = [
+                qid
+                for qid in all_questions
+                if (state.get(qid) or {}).get("status")
+                in ("completed", "empty")
+            ]
+            pending = [qid for qid in all_questions if qid not in completed]
+            audit = self.store.list_audit(case_id)
+            last_start = max(
+                (
+                    i
+                    for i, entry in enumerate(audit)
+                    if entry["event"] == "execution_started"
+                ),
+                default=-1,
+            )
+            already = any(
+                entry["event"] == "execution_interruption_detected"
+                for entry in audit[last_start + 1:]
+            )
+            if not already:
+                self.store.add_audit(
+                    case_id,
+                    "execution_interruption_detected",
+                    {
+                        "plan_version": (plan or {}).get("version"),
+                        "completed_questions": completed,
+                        "pending_questions": pending,
+                    },
+                )
+            found.append(
+                {
+                    "case": case,
+                    "checkpoint": checkpoint,
+                    "completed_questions": completed,
+                    "pending_questions": pending,
+                }
+            )
+        return found
+
+    def resume_execution(self, case_id: str, analyst: str) -> dict:
+        """Resume an interrupted case from its checkpoint.
+
+        Workstreams the checkpoint records as finished are not
+        re-run — their findings stand, under the IDs they were
+        recorded with. Only the incomplete waves execute. Budget
+        consumption carries over by construction: every run's
+        guard seeds its case-level caps from the ledger, which
+        already holds the interrupted attempt's checkpoints, so
+        a resume cannot re-spend spawns the dead run used.
+        """
+        case = self._require_case(case_id)
+        if case["status"] != "EXECUTING":
+            raise GateError(
+                "only an interrupted case can be resumed "
+                f"(status {case['status']})"
+            )
+        plan = self.store.get_plan(case_id)
+        if plan is None:
+            raise GateError("the interrupted case has no plan to resume")
+        defects = plan_defects((plan.get("plan") or {}).get("workstreams", []))
+        if defects:
+            raise GateError(
+                "plan cannot be executed: " + "; ".join(defects)
+            )
+        checkpoint = self.store.get_checkpoint(case_id)
+        skip: dict[str, dict] = {}
+        for entry in (plan.get("plan") or {}).get("workstreams", []):
+            qid = entry["question_id"]
+            saved = ((checkpoint or {}).get("workstreams") or {}).get(qid) or {}
+            if saved.get("status") in ("completed", "empty"):
+                skip[qid] = {
+                    "question_id": qid,
+                    "workstream": entry["workstream"],
+                    "status": saved["status"],
+                    "findings": saved.get("findings", 0),
+                    "reason": saved.get("reason"),
+                    "resumed": True,
+                }
+        self.store.add_audit(
+            case_id,
+            "execution_resumed",
+            {
+                "analyst": analyst,
+                "skipped_questions": sorted(skip),
+                "budget_carried": (checkpoint or {}).get("budget_snapshot"),
+                "checkpoint_attempt": (checkpoint or {}).get("attempt"),
+            },
+        )
+        log.info(
+            "case %s execution resumed by %s; %d workstream(s) carried",
+            case_id,
+            analyst,
+            len(skip),
+        )
+        return self._execute(
+            case,
+            plan,
+            skip=skip,
+            resumed=True,
+            attempt=(checkpoint or {}).get("attempt") or 1,
+        )
 
     def _run_wave(
         self, case: dict, plan_doc: dict, layer: list[dict], wave_index: int
@@ -666,6 +1034,253 @@ class CaseService:
                     "reason": payload.get("reason"),
                 }
         return [statuses[qid] for qid in order]
+
+    # -- evidence arrival + staleness ---------------------------------------------
+    def add_case_evidence(
+        self,
+        case_id: str,
+        analyst: str,
+        *,
+        title: str,
+        kind: str,
+        source: str,
+        doc_date: str,
+        text: str,
+    ) -> dict:
+        """A document arrives mid-case and becomes case evidence.
+
+        Ingestion follows the same rules as the intake corpus —
+        bytes to the object store, metadata and SHA-256 to the
+        case store, an ID from the case's sequence. When the case
+        already has a plan, the shell keys the document against
+        the plan's workstreams (continuity.stale_questions) and
+        marks the ones it speaks to STALE on the case record:
+        nothing re-runs and nothing is silently treated as though
+        it had always been there. Execution then refuses until an
+        analyst decides — re-plan, or proceed with the staleness
+        recorded. A FINAL case is closed: new evidence means a new
+        case.
+        """
+        case = self._require_case(case_id)
+        if case["status"] == "FINAL":
+            raise GateError(
+                "the case is FINAL; new evidence means a new case"
+            )
+        if not text or not text.strip():
+            raise ValueError("an evidence document needs text")
+        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:60]
+        slug = slug or "analyst-upload"
+        taken = {ev["doc_slug"] for ev in self.store.list_evidence(case_id)}
+        base, n = slug, 2
+        while slug in taken:
+            slug = f"{base}-{n}"
+            n += 1
+        ev = add_evidence_document(
+            self.store,
+            self.objects,
+            case,
+            slug=slug,
+            title=title,
+            kind=kind,
+            source=source,
+            doc_date=doc_date,
+            text=text,
+        )
+        self.store.add_audit(
+            case_id,
+            "evidence_added",
+            {
+                "evidence_id": ev["evidence_id"],
+                "slug": slug,
+                "sha256": ev["sha256"],
+                "analyst": analyst,
+            },
+        )
+        stale: list[dict] = []
+        if case["status"] != "INTAKE":
+            plan = self.store.get_plan(case_id)
+            stale = stale_questions(case, plan, text)
+            if stale:
+                marks = list(case.get("stale_marks") or [])
+                known = {
+                    (m["evidence_id"], m["question_id"]) for m in marks
+                }
+                for entry in stale:
+                    key = (ev["evidence_id"], entry["question_id"])
+                    if key in known:
+                        continue
+                    marks.append(
+                        {
+                            "evidence_id": ev["evidence_id"],
+                            "question_id": entry["question_id"],
+                            "workstream": entry["workstream"],
+                            "score": entry["score"],
+                            "marked_at": utcnow(),
+                        }
+                    )
+                case = self.store.update_case(case_id, stale_marks=marks)
+                self.store.add_audit(
+                    case_id,
+                    "workstreams_marked_stale",
+                    {
+                        "evidence_id": ev["evidence_id"],
+                        "questions": [s["question_id"] for s in stale],
+                    },
+                )
+        log.info(
+            "case %s evidence %s added by %s; %d workstream(s) stale",
+            case_id,
+            ev["evidence_id"],
+            analyst,
+            len(stale),
+        )
+        return {"evidence": ev, "stale_questions": [s["question_id"] for s in stale], "case": case}
+
+    def decide_staleness(
+        self, case_id: str, analyst: str, action: str, note: str = ""
+    ) -> dict:
+        """The analyst's answer to marked staleness: RE-PLAN, or
+        PROCEED with the staleness on the record.
+
+        Either way the decision itself is recorded on the case —
+        who, when, which evidence, which questions — and a proceed
+        decision rides into the next report's limits (and re-renders
+        into a draft that already exists), so a reader of the
+        report can see that part of it predates evidence the desk
+        chose not to re-run against.
+        """
+        case = self._require_case(case_id)
+        if action not in ("proceed", "replan"):
+            raise ValueError(
+                f"unknown staleness decision {action!r}; "
+                "expected 'proceed' or 'replan'"
+            )
+        marks = case.get("stale_marks") or []
+        if not marks:
+            raise GateError(
+                "no unresolved staleness on this case to decide"
+            )
+        decision = {
+            "action": action,
+            "analyst": analyst,
+            "note": note,
+            "at": utcnow(),
+            "evidence_ids": sorted({m["evidence_id"] for m in marks}),
+            "questions": sorted({m["question_id"] for m in marks}),
+        }
+        if action == "replan":
+            return self.replan_case(
+                case_id, analyst, note=note, staleness_decision=decision
+            )
+        decisions = list(case.get("staleness_decisions") or [])
+        decisions.append(decision)
+        case = self.store.update_case(
+            case_id, stale_marks=[], staleness_decisions=decisions
+        )
+        self.store.add_audit(case_id, "staleness_proceeded", decision)
+        report = self.store.get_report(case_id)
+        if report is not None:
+            # The decision belongs in the draft the analyst is
+            # looking at, not only in the next one: re-render it
+            # (the conflicts pass re-renders the markdown from the
+            # record, limits included).
+            apply_conflicts(
+                self.store,
+                self.objects,
+                case,
+                report,
+                self.store.list_conflicts(case_id),
+            )
+        return case
+
+    def replan_case(
+        self,
+        case_id: str,
+        analyst: str,
+        note: str = "",
+        staleness_decision: dict | None = None,
+    ) -> dict:
+        """Revise the plan mid-case: the re-gated path back to
+        planning.
+
+        The superseded plan stays in the versioned plan store; a
+        draft the revision supersedes is snapshotted first, so
+        revising a plan never destroys a report the desk already
+        had. The case returns to PLAN_REJECTED, from which
+        run_planning mints plan version n+1 — with the analyst
+        notes in its context — and the new plan faces the plan
+        gate again like any other.
+
+        Findings reuse is set only when staleness marks named the
+        workstreams the new evidence touches (the re-plan that
+        answers an evidence arrival): the next execution re-runs
+        exactly the marked workstreams and reuses the rest under
+        _reuse_skip's evidence-unchanged rule. A general revision
+        sets no directive and re-executes in full.
+        """
+        case = self._require_case(case_id)
+        if case["status"] in ("INTAKE", "EXECUTING", "FINAL"):
+            raise GateError(
+                f"no plan to revise from status {case['status']}"
+            )
+        plan = self.store.get_plan(case_id)
+        if plan is None:
+            raise GateError("no plan to revise")
+        marks = case.get("stale_marks") or []
+        must_rerun = sorted({m["question_id"] for m in marks})
+        snapshot_id = None
+        report = self.store.get_report(case_id)
+        if report is not None:
+            snapshot = self.store.add_report_snapshot(
+                case_id,
+                {
+                    "report": report,
+                    "reason": "superseded by a plan revision",
+                    "analyst": analyst,
+                    "created_at": utcnow(),
+                },
+            )
+            snapshot_id = snapshot["snapshot_id"]
+            self.store.add_audit(
+                case_id,
+                "report_snapshotted",
+                {
+                    "snapshot_id": snapshot_id,
+                    "plan_version": plan["version"],
+                    "reason": "superseded by a plan revision",
+                },
+            )
+        decisions = list(case.get("staleness_decisions") or [])
+        if staleness_decision is not None:
+            decisions.append(staleness_decision)
+        from_status = case["status"]
+        case = self.store.update_case(
+            case_id,
+            status="PLAN_REJECTED",
+            stale_marks=[],
+            staleness_decisions=decisions,
+            reuse_findings=bool(marks),
+            must_rerun=must_rerun,
+        )
+        self.store.add_audit(
+            case_id,
+            "plan_revision_requested",
+            {
+                "analyst": analyst,
+                "note": note,
+                "from_status": from_status,
+                "superseded_plan_version": plan["version"],
+                "must_rerun": must_rerun,
+                "report_snapshot": snapshot_id,
+            },
+        )
+        log.info(
+            "case %s plan revision requested by %s (plan v%d superseded)",
+            case_id,
+            analyst,
+            plan["version"],
+        )
+        return case
 
     # -- case notes -------------------------------------------------------------
     def add_case_note(self, case_id: str, analyst: str, text: str) -> dict:
