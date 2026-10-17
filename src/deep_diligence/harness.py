@@ -32,9 +32,12 @@ PHASE: PLAN — read the brief (BRIEF_JSON). Decompose it into one
 workstream per question. Call write_todos with the workstream list,
 then write /plan.md (a readable plan for the analyst) and /plan.json
 (the same plan as JSON with a "workstreams" list of
-{"question_id", "workstream", "objective", "keywords"} objects).
-Do NOT gather evidence in this phase: execution is gated on analyst
-approval of the plan.
+{"question_id", "workstream", "objective", "keywords",
+"depends_on"} objects). A question whose brief entry declares
+depends_on carries the same question ids in its workstream's
+depends_on: those workstreams run first, and this one starts only
+after they finish. Do NOT gather evidence in this phase: execution
+is gated on analyst approval of the plan.
 
 PHASE: EXECUTE — the plan in PLAN_JSON is approved. For each
 workstream, call the task tool with subagent_type set to the
@@ -44,6 +47,11 @@ WORKSTREAM: <workstream>
 SUBJECT: <subject>
 QUESTION: <question text>
 KEYWORDS: <comma-separated stems>
+A workstream entry may carry prior_findings — the recorded
+findings of the workstreams it depends on. When it does, copy them
+into the description verbatim under a PRIOR FINDINGS heading: they
+are the sub-agent's starting context, never a substitute for its
+own reading of the documents.
 Then write /execution/notes.md summarising what ran, and finish.
 
 Rules that never bend: findings come only from workstream sub-agents
