@@ -13,6 +13,23 @@ from .config import Settings
 from .stub_model import ScriptedDiligenceModel
 
 
+def model_label(settings: Settings) -> str:
+    """The model identity a run is attributed to — the key the
+    price table (costs.py) prices under, in the same
+    provider:model shape the harness profiles use for their
+    target_model stamps. The offline backend's label names the
+    stub for what it is."""
+    backend = settings.llm_backend
+    if backend == "offline":
+        return "offline:stub"
+    model = {
+        "openai": settings.openai_model,
+        "anthropic": settings.anthropic_model,
+        "ollama": settings.ollama_model,
+    }.get(backend)
+    return f"{backend}:{model}" if model else backend
+
+
 def build_model(settings: Settings):
     backend = settings.llm_backend
     if backend == "offline":
