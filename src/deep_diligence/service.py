@@ -20,7 +20,8 @@ from langchain_core.messages import HumanMessage
 
 from .backend import EvidenceBackend
 from .budgets import BudgetExceededError, BudgetGuard
-from .composer import apply_verification, compose_report
+from .composer import apply_conflicts, apply_verification, compose_report
+from .conflicts import detect_conflicts
 from .config import Settings
 from .corpus import companies
 from .evidence import ingest_case_evidence
@@ -263,7 +264,101 @@ class CaseService:
             result["supported"],
             result["quarantined"],
         )
-        return report
+        return self._detect_conflicts(case, report)
+
+    def _detect_conflicts(self, case: dict, report: dict) -> dict:
+        """The conflict pass, after verification: key the supported
+        claims by (entity, metric, period) and record where they
+        assert different values for the same key. Conflicts annotate
+        the draft — no claim is removed, merged, or preferred — and
+        the records ride into the report's Conflicts section."""
+        case_id = case["case_id"]
+        records = detect_conflicts(self.store, case, report["claims"])
+        self.store.replace_conflicts(case_id, records)
+        if records:
+            self.store.add_audit(
+                case_id,
+                "conflicts_detected",
+                {
+                    "count": len(records),
+                    "conflicts": [
+                        {
+                            "conflict_id": r["conflict_id"],
+                            "metric": r["key"]["metric"],
+                            "period": r["key"]["period"],
+                            "values": [
+                                side["value_text"] for side in r["sides"]
+                            ],
+                        }
+                        for r in records
+                    ],
+                },
+            )
+            log.info(
+                "case %s conflicts detected: %d", case_id, len(records)
+            )
+        return apply_conflicts(
+            self.store, self.objects, case, report, records
+        )
+
+    def decide_conflict(
+        self,
+        case_id: str,
+        conflict_id: str,
+        analyst: str,
+        note: str = "",
+    ) -> dict:
+        """The analyst's only move on a conflict: mark it NOTED,
+        with a note.
+
+        There is deliberately no resolve or delete move: a conflict
+        is a fact about the evidence, not a task to clear. Marking
+        NOTED records that the analyst has seen the disagreement and
+        what they made of it; the record — and the report's
+        Conflicts section, re-rendered with the note — stays
+        permanently.
+        """
+        case = self._require_case(case_id)
+        if case["status"] not in ("DRAFT_READY", "BUDGET_EXHAUSTED"):
+            raise GateError(
+                f"no report at the gate to note a conflict on "
+                f"(status {case['status']})"
+            )
+        if not note.strip():
+            raise ValueError("marking a conflict NOTED requires a note")
+        record = self.store.get_conflict(case_id, conflict_id)
+        if record is None:
+            raise KeyError(conflict_id)
+        if record["status"] != "OPEN":
+            raise GateError(
+                f"conflict {conflict_id} is already {record['status']}"
+            )
+        record["status"] = "NOTED"
+        record["noted_by"] = analyst
+        record["note"] = note
+        record["noted_at"] = utcnow()
+        self.store.update_conflict(case_id, record)
+        self.store.add_audit(
+            case_id,
+            "conflict_noted",
+            {
+                "conflict_id": conflict_id,
+                "metric": record["key"]["metric"],
+                "period": record["key"]["period"],
+                "analyst": analyst,
+                "note": note,
+            },
+        )
+        report = self.store.get_report(case_id)
+        if report is not None:
+            apply_conflicts(
+                self.store,
+                self.objects,
+                case,
+                report,
+                self.store.list_conflicts(case_id),
+            )
+        return record
 
     def decide_quarantine(
         self,

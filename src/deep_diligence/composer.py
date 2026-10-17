@@ -19,6 +19,14 @@ against its evidence; `apply_verification` then re-renders the draft
 from the supported claims only — quarantined claims leave the body,
 the ledger is rebuilt to match, and a Verification section records
 the outcome in the draft itself.
+
+Finally, `apply_conflicts` re-renders the draft with its Conflicts
+section, generated from the conflict records (conflicts.py): where
+supported claims assert different values for the same (entity,
+metric, period), both sides are stated with their values verbatim
+and their source labels. The section is generated from the records,
+never hand-written, and a conflict the analyst has marked NOTED
+renders with its note — it is never removed.
 """
 
 from __future__ import annotations
@@ -38,6 +46,7 @@ def _render_markdown(
     exceeded_kind: str | None = None,
     refused: list[str] | None = None,
     verification: dict | None = None,
+    conflicts: list[dict] | None = None,
 ) -> str:
     brief = case["brief"]
     coverage = {q["id"]: 0 for q in brief["questions"]}
@@ -76,6 +85,52 @@ def _render_markdown(
             citations = " ".join(f"[{eid}]" for eid in claim["evidence_ids"])
             lines.append(f"- {claim['claim']} {citations}")
         lines.append("")
+    if conflicts:
+        lines += [
+            "## Conflicts",
+            "",
+            "The supported findings disagree on the items below. "
+            "Both sides are reported, with the values as stated and "
+            "the source each side rests on; the desk takes no "
+            "position on which value is correct, and neither side "
+            "has been suppressed or merged.",
+            "",
+        ]
+        for record in conflicts:
+            key = record["key"]
+            period = key["period"] if key["period"] else "no period stated"
+            lines.append(
+                f"### {record['conflict_id']} — {key['metric']} · "
+                f"{period} · {key['entity']}"
+            )
+            lines.append("")
+            for side in record["sides"]:
+                lines.append(f"- **{side['value_text']}**")
+                for member in side["claims"]:
+                    citations = " ".join(
+                        f"[{eid}]" for eid in member["evidence_ids"]
+                    )
+                    lines.append(
+                        f'  - {member["claim_id"]}: "{member["claim"]}" '
+                        f"{citations}"
+                    )
+                    for source in member["sources"]:
+                        context = (
+                            f"Source: {source['source']}, dated "
+                            f"{source['doc_date']} · "
+                            f"{source['source_class']} source"
+                        )
+                        if member["more_recent"]:
+                            context += " · more recent"
+                        lines.append(f"    {context}")
+            if record["status"] == "NOTED":
+                lines.append(
+                    f"  - Analyst note — marked NOTED by "
+                    f"{record['noted_by']} on {record['noted_at']}: "
+                    f'"{record["note"]}" The conflict remains part of '
+                    "this report."
+                )
+            lines.append("")
     # References are generated from the citation ledger: the evidence
     # the report actually cites, each with the content hash recorded
     # at citation time, so a reader can check a source is unchanged.
@@ -195,6 +250,7 @@ def compose_report(
         },
         "verification": None,
         "quarantined": [],
+        "conflicts": [],
         "integrity": {"status": "OK", "checked_at": utcnow()},
         "composed_at": utcnow(),
         "decided_by": None,
@@ -266,6 +322,55 @@ def apply_verification(
                 "reason": r["reason"],
             }
             for r in quarantine_records
+        ],
+    }
+    return store.save_report(case_id, report)
+
+
+def apply_conflicts(
+    store: Store,
+    objects: ObjectStore,
+    case: dict,
+    report: dict,
+    conflict_records: list[dict],
+) -> dict:
+    """Re-render a verified draft with its Conflicts section.
+
+    The section is generated from the conflict records, so the
+    report the analyst reads and the stored records cannot drift
+    apart. Called once after conflict detection, and again whenever
+    a conflict is marked NOTED, so the note renders into the draft
+    and stays there. Claims, coverage, verification, and the
+    citation ledger are unchanged — conflicts annotate the report,
+    they do not alter its claims.
+    """
+    case_id = case["case_id"]
+    claims = report["claims"]
+    entries = build_ledger(store, objects, case_id, claims)
+    evidence_count = store.count_evidence(case_id)
+    report = {
+        **report,
+        "markdown": _render_markdown(
+            case,
+            claims,
+            evidence_count,
+            entries,
+            partial=report["partial"],
+            exceeded_kind=report["exceeded_kind"],
+            refused=report["refused_claims"],
+            verification=report["verification"],
+            conflicts=conflict_records,
+        ),
+        "conflicts": [
+            {
+                "conflict_id": r["conflict_id"],
+                "key": r["key"],
+                "values": [side["value_text"] for side in r["sides"]],
+                "status": r["status"],
+                "noted_by": r["noted_by"],
+                "note": r["note"],
+            }
+            for r in conflict_records
         ],
     }
     return store.save_report(case_id, report)
