@@ -289,6 +289,42 @@ class Store:
         )
         return json.loads(row["payload"]) if row else None
 
+    # -- citation ledger ------------------------------------------------------
+    def replace_ledger(self, case_id: str, entries: list[dict]) -> list[dict]:
+        # A re-composition mints a new report, so its ledger replaces
+        # the old one wholesale; delete + inserts are one locked step
+        # so a reader never sees a half-written ledger.
+        with self._lock:
+            self._conn.execute(
+                self._sql("DELETE FROM citation_ledger WHERE case_id = ?"),
+                (case_id,),
+            )
+            for entry in entries:
+                self._conn.execute(
+                    self._sql(
+                        "INSERT INTO citation_ledger"
+                        " (case_id, claim_id, finding_id, question_id, payload, created_at)"
+                        " VALUES (?, ?, ?, ?, ?, ?)"
+                    ),
+                    (
+                        case_id,
+                        entry["claim_id"],
+                        entry["finding_id"],
+                        entry["question_id"],
+                        json.dumps(entry),
+                        entry["cited_at"],
+                    ),
+                )
+            self._conn.commit()
+        return entries
+
+    def list_ledger(self, case_id: str) -> list[dict]:
+        rows = self._fetchall(
+            "SELECT payload FROM citation_ledger WHERE case_id = ? ORDER BY claim_id",
+            (case_id,),
+        )
+        return [json.loads(r["payload"]) for r in rows]
+
     # -- virtual filesystem index ---------------------------------------------
     def put_file_meta(self, case_id: str, path: str, sha256: str, size: int) -> None:
         existing = self.get_file_meta(case_id, path)

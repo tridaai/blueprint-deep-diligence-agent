@@ -35,7 +35,9 @@ def test_composer_refuses_uncited_or_bogus_claims(service, case):
             "fact_ref": None,
         }
     )
-    report = compose_report(service.store, service.store.get_case(case_id))
+    report = compose_report(
+        service.store, service.objects, service.store.get_case(case_id)
+    )
     assert report["refused_claims"] == ["FND-9001", "FND-9002"]
     assert "A claim resting on evidence" not in report["markdown"]
     assert report["claims"] == []

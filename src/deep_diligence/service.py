@@ -187,7 +187,7 @@ class CaseService:
         )
         if error is not None:
             report = compose_report(
-                self.store, case, partial=True, exceeded_kind=error.kind
+                self.store, self.objects, case, partial=True, exceeded_kind=error.kind
             )
             self.store.add_audit(
                 case_id, "report_composed", {"partial": True, "usage": usage}
@@ -195,7 +195,7 @@ class CaseService:
             self.store.update_case(case_id, status="BUDGET_EXHAUSTED")
             log.info("case %s budget exhausted (%s)", case_id, error.kind)
             return report
-        report = compose_report(self.store, case)
+        report = compose_report(self.store, self.objects, case)
         self.store.add_audit(
             case_id, "report_composed", {"partial": False, "usage": usage}
         )

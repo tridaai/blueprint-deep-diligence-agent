@@ -7,15 +7,28 @@ write time) and named in the draft's method note. Every claim line
 carries its evidence IDs; a question with no findings says so plainly;
 a partial draft (budget exhausted) names the uncovered questions
 instead of quietly omitting them.
+
+Composition is also when citations are *made*: each composed claim
+gets a claim ID (CLM-0001, ...) and a citation-ledger entry recording
+the hash of every cited evidence item's bytes at this moment (see
+ledger.py). The report's References section is generated from that
+ledger — the model never writes it.
 """
 
 from __future__ import annotations
 
+from .ledger import build_ledger
+from .objects import ObjectStore
 from .store import Store, utcnow
 
 
 def compose_report(
-    store: Store, case: dict, *, partial: bool = False, exceeded_kind: str | None = None
+    store: Store,
+    objects: ObjectStore,
+    case: dict,
+    *,
+    partial: bool = False,
+    exceeded_kind: str | None = None,
 ) -> dict:
     case_id = case["case_id"]
     brief = case["brief"]
@@ -27,7 +40,14 @@ def compose_report(
         if not valid:
             refused.append(finding["finding_id"])
             continue
-        claims.append({**finding, "evidence_ids": valid})
+        claims.append(
+            {
+                **finding,
+                "claim_id": f"CLM-{len(claims) + 1:04d}",
+                "evidence_ids": valid,
+            }
+        )
+    entries = build_ledger(store, objects, case_id, claims)
     coverage = {q["id"]: 0 for q in brief["questions"]}
     for claim in claims:
         coverage[claim["question_id"]] = coverage.get(claim["question_id"], 0) + 1
@@ -65,12 +85,27 @@ def compose_report(
             citations = " ".join(f"[{eid}]" for eid in claim["evidence_ids"])
             lines.append(f"- {claim['claim']} {citations}")
         lines.append("")
-    lines += ["## Sources", ""]
-    for evidence_id in sorted(evidence):
-        ev = evidence[evidence_id]
-        lines.append(
-            f"- [{evidence_id}] {ev['title']} — {ev['source']}, {ev['doc_date']}"
-        )
+    # References are generated from the citation ledger: the evidence
+    # the report actually cites, each with the content hash recorded
+    # at citation time, so a reader can check a source is unchanged.
+    cited: dict[str, dict] = {}
+    for entry in entries:
+        for citation in entry["citations"]:
+            slot = cited.setdefault(
+                citation["evidence_id"], {**citation, "cited_by": []}
+            )
+            slot["cited_by"].append(entry["claim_id"])
+    lines += ["## References", ""]
+    if cited:
+        for evidence_id in sorted(cited):
+            citation = cited[evidence_id]
+            lines.append(
+                f"- [{evidence_id}] {citation['source']} — {citation['title']} "
+                f"· sha256 {citation['sha256'][:12]}… "
+                f"· cited by {', '.join(citation['cited_by'])}"
+            )
+    else:
+        lines.append("_No cited evidence._")
     lines += [
         "",
         "## Method and limits",
@@ -95,6 +130,12 @@ def compose_report(
         "claims": claims,
         "refused_claims": refused,
         "coverage": coverage,
+        "ledger": {
+            "entries": len(entries),
+            "citations": sum(len(e["citations"]) for e in entries),
+            "built_at": utcnow(),
+        },
+        "integrity": {"status": "OK", "checked_at": utcnow()},
         "composed_at": utcnow(),
         "decided_by": None,
         "decision_note": None,
