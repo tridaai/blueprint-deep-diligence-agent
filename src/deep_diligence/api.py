@@ -25,18 +25,25 @@ from .models import (
     CaseOut,
     ConflictNoteIn,
     DecisionIn,
+    ProfileEvaluateIn,
+    ProfilePromoteIn,
+    ProfileRollbackIn,
     QuarantineDecisionIn,
 )
+from .profiles import ProfileError, list_profile_ids, load_profile
+from .promotion import PromotionError
 from .service import CaseService, GateError
 
 log = logging.getLogger("deep_diligence.api")
 STATIC_INDEX = Path(__file__).parent / "static" / "index.html"
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None, service: CaseService | None = None
+) -> FastAPI:
     configure_logging()
     settings = settings or load_settings()
-    service = CaseService(settings)
+    service = service or CaseService(settings)
     app = FastAPI(title="Deep Diligence Agent — Trida AI Blueprint")
     app.state.service = service
     app.state.settings = settings
@@ -290,6 +297,62 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except GateError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return CaseOut(**case).model_dump()
+
+    # -- profile regression gate -------------------------------------------
+    # The active profile is read from the promotion log; the only
+    # writes are an evaluation (evidence), a promotion (decision),
+    # and a rollback (decision). There is deliberately no endpoint
+    # that sets the active profile directly.
+    @app.get("/api/profiles")
+    def get_profiles() -> dict:
+        profiles = []
+        for profile_id in list_profile_ids(settings.profile_dir):
+            try:
+                profiles.append(load_profile(profile_id, settings.profile_dir).record())
+            except ProfileError as exc:
+                profiles.append({"id": profile_id, "error": str(exc)})
+        return {**service.active_profile_info(), "profiles": profiles}
+
+    @app.get("/api/profiles/evaluations")
+    def list_evaluations() -> list[dict]:
+        return service.store.list_evaluations()
+
+    @app.get("/api/profiles/promotions")
+    def list_promotions() -> list[dict]:
+        return service.store.list_promotions()
+
+    @app.post(
+        "/api/profiles/evaluate", dependencies=[Depends(require_api_key)]
+    )
+    def evaluate_profile(request: ProfileEvaluateIn) -> dict:
+        try:
+            return service.evaluate_profile(request.candidate_id, request.analyst)
+        except ProfileError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except PromotionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/profiles/promote", dependencies=[Depends(require_api_key)])
+    def promote_profile(request: ProfilePromoteIn) -> dict:
+        try:
+            record = service.promote_profile(request.evaluation_id, request.analyst)
+        except KeyError:
+            raise HTTPException(
+                status_code=404, detail="evaluation not found"
+            ) from None
+        except PromotionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"promotion": record, "active": service.profile.record()}
+
+    @app.post("/api/profiles/rollback", dependencies=[Depends(require_api_key)])
+    def rollback_profile(request: ProfileRollbackIn) -> dict:
+        try:
+            record = service.rollback_profile(
+                request.analyst, request.note or None
+            )
+        except PromotionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"promotion": record, "active": service.profile.record()}
 
     return app
 

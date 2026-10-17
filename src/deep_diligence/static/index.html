@@ -73,6 +73,8 @@
     <div class="muted" style="margin-top:8px">Cases run on the offline corpus with the model configured on the server (the offline stub by default).</div>
     <h2>Cases</h2>
     <div id="cases"></div>
+    <h2>Harness profile gate</h2>
+    <div id="profiles"><p class="muted">Loading…</p></div>
   </aside>
   <section id="detail">
     <p class="muted">Pick a case, or create one from a sample brief.</p>
@@ -315,6 +317,61 @@ async function openCase(caseId) {
     $("#ev-view").innerHTML = `<h3 style="margin-top:14px">[${esc(ev.evidence_id)}] ${esc(ev.title)}</h3><pre class="plain">${esc(ev.text)}</pre>`;
   }));
 }
+async function refreshProfiles() {
+  const box = $("#profiles");
+  try {
+    const info = await api("/api/profiles");
+    const evals = await api("/api/profiles/evaluations");
+    const promos = await api("/api/profiles/promotions");
+    const candidates = info.profiles.filter(p => !p.error && !(p.id === info.active.id && p.version === info.active.version));
+    const pct = (x) => `${(x * 100).toFixed(1)}%`;
+    box.innerHTML = `
+      <p style="margin:4px 0">Active: <strong>${esc(info.active.id)} v${esc(String(info.active.version))}</strong><br>
+      <span class="muted">${esc(info.source)}</span></p>
+      <label class="muted">Candidate profile</label>
+      <select id="pf-candidate">${candidates.map(p => `<option value="${esc(p.id)}">${esc(p.id)} v${esc(String(p.version))} (${esc(p.target_model)})</option>`).join("")}</select>
+      <button class="wide" id="pf-evaluate" ${candidates.length ? "" : "disabled"}>Evaluate candidate (3 runs, worst run decides)</button>
+      <div class="muted" style="margin:6px 0">A candidate is judged against the incumbent's recorded baseline: match it on the tuning cases, stay within tolerance on the held-out cases, hold every zero-tolerance line. Evaluating runs the full pack three times and takes a while.</div>
+      ${evals.length ? `<h3 style="margin:10px 0 4px">Evaluations</h3>` + evals.slice().reverse().map(e => `
+        <div style="border-top:1px solid var(--line);padding:6px 0">
+          <strong>${esc(e.candidate.id)} v${esc(String(e.candidate.version))}</strong> vs ${esc(e.incumbent.id)} v${esc(String(e.incumbent.version))} — <strong>${esc(e.verdict)}</strong><br>
+          <span class="muted">bars: tuning ${pct(e.bars.tuning)}, held-out ${pct(e.bars.held_out)} · worst candidate runs: tuning ${pct(Math.min(...e.runs.map(r => r.subsets.tuning.recall)))}, held-out ${pct(Math.min(...e.runs.map(r => r.subsets.held_out.recall)))} · by ${esc(e.evaluated_by)}</span>
+          ${e.failures.length ? `<div class="muted">${e.failures.map(f => esc(f.detail)).join("<br>")}</div>` : ""}
+          ${e.verdict === "PROMOTABLE" ? `<button class="secondary" data-promote="${esc(e.evaluation_id)}">Promote ${esc(e.candidate.id)}</button>` : ""}
+        </div>`).join("") : ""}
+      ${promos.length ? `<h3 style="margin:10px 0 4px">Promotion log</h3>` + promos.slice().reverse().map(p => `
+        <div style="border-top:1px solid var(--line);padding:6px 0">
+          <strong>${esc(p.kind)}</strong>: ${esc(p.incumbent.id)} v${esc(String(p.incumbent.version))} → ${esc(p.candidate.id)} v${esc(String(p.candidate.version))}<br>
+          <span class="muted">by ${esc(p.analyst)} · ${esc(p.created_at)}${p.note ? ` · ${esc(p.note)}` : ""}</span>
+        </div>`).join("") + `<button class="wide danger" id="pf-rollback">Roll back to the previous profile</button>` : ""}
+    `;
+    const evalBtn = $("#pf-evaluate");
+    if (evalBtn) evalBtn.addEventListener("click", async () => {
+      evalBtn.disabled = true; evalBtn.textContent = "Evaluating — running the packs three times…";
+      try {
+        await api("/api/profiles/evaluate", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({candidate_id: $("#pf-candidate").value, analyst: "Console Analyst"})});
+      } catch (e) { alert(e.message); }
+      await refreshProfiles();
+    });
+    box.querySelectorAll("[data-promote]").forEach(btn => btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      try {
+        await api("/api/profiles/promote", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({evaluation_id: btn.dataset.promote, analyst: "Console Analyst"})});
+      } catch (e) { alert(e.message); }
+      await refreshProfiles(); await refreshCases();
+    }));
+    const rb = $("#pf-rollback");
+    if (rb) rb.addEventListener("click", async () => {
+      rb.disabled = true;
+      try {
+        await api("/api/profiles/rollback", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({analyst: "Console Analyst", note: "Rolled back from the console"})});
+      } catch (e) { alert(e.message); }
+      await refreshProfiles(); await refreshCases();
+    });
+  } catch (e) {
+    box.innerHTML = `<p class="muted">Profile gate unavailable: ${esc(e.message)}</p>`;
+  }
+}
 async function init() {
   try {
     const ready = await api("/readiness");
@@ -331,6 +388,7 @@ async function init() {
     await openCase(created.case_id);
   });
   await refreshCases();
+  await refreshProfiles();
 }
 init();
 </script>

@@ -96,6 +96,21 @@ class QuarantineDecisionIn(BaseModel):
     note: str = Field(default="", max_length=2000)
 
 
+class ProfileEvaluateIn(BaseModel):
+    candidate_id: str = Field(min_length=1, max_length=120)
+    analyst: str = Field(min_length=1, max_length=120)
+
+
+class ProfilePromoteIn(BaseModel):
+    evaluation_id: str = Field(min_length=1, max_length=120)
+    analyst: str = Field(min_length=1, max_length=120)
+
+
+class ProfileRollbackIn(BaseModel):
+    analyst: str = Field(min_length=1, max_length=120)
+    note: str = Field(default="", max_length=2000)
+
+
 class CaseOut(BaseModel):
     case_id: str
     status: str

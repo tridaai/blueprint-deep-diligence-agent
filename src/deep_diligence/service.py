@@ -39,7 +39,8 @@ from .ledger import verify_ledger
 from .llm import build_model
 from .models import BudgetIn, BriefIn
 from .objects import ObjectStore, build_object_store
-from .profiles import load_profile
+from .profiles import ProfileError, load_profile
+from .promotion import ProfileGate
 from .store import Store, build_store, utcnow
 from .tools import build_case_tools
 from .verifier import verify_case
@@ -54,13 +55,15 @@ class GateError(RuntimeError):
 class CaseService:
     def __init__(self, settings: Settings):
         self.settings = settings
-        # The active harness profile is loaded and validated before
-        # anything else: a profile that refuses to load refuses the
-        # startup with it (fail-closed, no silent fallback). The
-        # model is injected separately by the provider boundary; the
-        # profile is configuration.
-        self.profile = load_profile(settings.profile_id, settings.profile_dir)
+        # The store is built first because the promotion log lives
+        # in it. The active harness profile is then resolved before
+        # any case work and validated at load: a profile that refuses
+        # to load refuses the startup with it (fail-closed, no silent
+        # fallback). The model is injected separately by the provider
+        # boundary; the profile is configuration.
         self.store: Store = build_store(settings)
+        self.profile = self._resolve_active_profile()
+        self.gate = ProfileGate(self.store, settings.profile_dir)
         self.objects: ObjectStore = build_object_store(settings)
         log.info(
             "harness profile %s v%d (target %s)",
@@ -68,6 +71,65 @@ class CaseService:
             self.profile.version,
             self.profile.target_model,
         )
+
+    def _resolve_active_profile(self):
+        """PROFILE_ID is the bootstrap default only. Once a
+        promotion is recorded, the newest promotion record names the
+        active profile, and there is no other way to move the
+        pointer: this method reads the log, nothing anywhere writes
+        an active-profile field."""
+        bootstrap = load_profile(
+            self.settings.profile_id, self.settings.profile_dir
+        )
+        latest = self.store.latest_promotion()
+        if latest is None:
+            return bootstrap
+        promoted = load_profile(
+            latest["candidate"]["id"], self.settings.profile_dir
+        )
+        if promoted.record() != latest["candidate"]:
+            raise ProfileError(
+                f"promotion {latest['promotion_id']} made "
+                f"{latest['candidate']['id']} v{latest['candidate']['version']} "
+                f"active, but the profile file is now v{promoted.version}; "
+                "the gate refuses to run a version the log did not promote"
+            )
+        return promoted
+
+    # -- profile regression gate ----------------------------------------------
+    def active_profile_info(self) -> dict:
+        latest = self.store.latest_promotion()
+        return {
+            "active": self.profile.record(),
+            "source": (
+                f"promotion {latest['promotion_id']}"
+                if latest is not None
+                else "bootstrap (PROFILE_ID; no promotion recorded)"
+            ),
+            "bootstrap": {
+                "id": self.settings.profile_id,
+            },
+            "latest_promotion": latest,
+        }
+
+    def evaluate_profile(self, candidate_id: str, analyst: str) -> dict:
+        return self.gate.evaluate(candidate_id, self.profile, analyst)
+
+    def promote_profile(self, evaluation_id: str, analyst: str) -> dict:
+        record = self.gate.promote(evaluation_id, analyst, self.profile)
+        # The pointer moves for new cases from this moment; cases
+        # already created keep the profile stamp they were born with.
+        self.profile = load_profile(
+            record["candidate"]["id"], self.settings.profile_dir
+        )
+        return record
+
+    def rollback_profile(self, analyst: str, note: str | None = None) -> dict:
+        record = self.gate.rollback(analyst, note, self.profile)
+        self.profile = load_profile(
+            record["candidate"]["id"], self.settings.profile_dir
+        )
+        return record
 
     # -- helpers ------------------------------------------------------------
     def _require_case(self, case_id: str) -> dict:
