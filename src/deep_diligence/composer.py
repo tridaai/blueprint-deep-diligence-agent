@@ -4,9 +4,14 @@ It assembles the report draft from recorded findings, grouped by
 question. A finding whose citations no longer resolve to case evidence
 is refused here a second time (record_finding already enforces it at
 write time) and named in the draft's method note. Every claim line
-carries its evidence IDs; a question with no findings says so plainly;
-a partial draft (budget exhausted) names the uncovered questions
-instead of quietly omitting them.
+carries its evidence IDs; a question with no findings says so plainly.
+A partial draft (budget exhausted) follows the partial-report
+protocol: its banner names the cap and the phase that stopped, and
+coverage is itemised per question — ANSWERED, PARTIAL (findings
+exist but the run stopped mid-workstream), or NOT COVERED — derived
+in code by `question_coverage` from the claims and the plan's
+workstream mapping, and carried on the report record so the
+analyst's approval records the coverage it approved.
 
 Composition is also when citations are *made*: each composed claim
 gets a claim ID (CLM-0001, ...) and a citation-ledger entry recording
@@ -36,6 +41,40 @@ from .objects import ObjectStore
 from .store import Store, utcnow
 
 
+def question_coverage(
+    brief: dict,
+    claims: list[dict],
+    interrupted_questions: list[str] | tuple[str, ...] = (),
+) -> list[dict]:
+    """Coverage per brief question, derived in code from the
+    report's claims and the plan's workstream mapping (the caller
+    resolves which questions the stopped run was inside of, from
+    the plan's workstream order and the spawns still open when the
+    cap tripped):
+
+    - ANSWERED — findings for the question are in the report and
+      its workstream was not the one interrupted.
+    - PARTIAL — findings exist, but the run stopped mid-workstream,
+      so the question's investigation is incomplete.
+    - NOT COVERED — no findings recorded for the question.
+    """
+    counts = _coverage(brief, claims)
+    interrupted = set(interrupted_questions or ())
+    detail = []
+    for question in brief["questions"]:
+        found = counts.get(question["id"], 0)
+        if found == 0:
+            status = "NOT COVERED"
+        elif question["id"] in interrupted:
+            status = "PARTIAL"
+        else:
+            status = "ANSWERED"
+        detail.append(
+            {"question_id": question["id"], "status": status, "findings": found}
+        )
+    return detail
+
+
 def _render_markdown(
     case: dict,
     claims: list[dict],
@@ -44,14 +83,13 @@ def _render_markdown(
     *,
     partial: bool = False,
     exceeded_kind: str | None = None,
+    exceeded_phase: str | None = None,
+    coverage_detail: list[dict] | None = None,
     refused: list[str] | None = None,
     verification: dict | None = None,
     conflicts: list[dict] | None = None,
 ) -> str:
     brief = case["brief"]
-    coverage = {q["id"]: 0 for q in brief["questions"]}
-    for claim in claims:
-        coverage[claim["question_id"]] = coverage.get(claim["question_id"], 0) + 1
     lines = [
         f"# Diligence report — {brief['subject']}",
         "",
@@ -61,21 +99,29 @@ def _render_markdown(
         "",
     ]
     if partial:
-        uncovered = [qid for qid, n in coverage.items() if n == 0]
         lines += [
             "> **Partial report.** The run stopped on its "
-            f"{exceeded_kind or 'budget'} budget before the plan was fully "
-            "executed. Findings below are what was recorded before the "
-            "stop; treat uncovered questions as not investigated.",
+            f"{exceeded_kind or 'budget'} budget during the "
+            f"{exceeded_phase or 'execution'} phase, before the plan "
+            "was fully executed. Findings below are what was "
+            "recorded before the stop; coverage is itemised per "
+            "question — treat anything not ANSWERED as not fully "
+            "investigated.",
             "",
         ]
-        if uncovered:
-            lines += [
-                "Questions with no findings recorded: "
-                + ", ".join(uncovered)
-                + ".",
-                "",
-            ]
+        if coverage_detail:
+            lines += ["Coverage by question:", ""]
+            for row in coverage_detail:
+                line = (
+                    f"- {row['question_id']} — {row['status']} "
+                    f"({row['findings']} finding(s) in this report)"
+                )
+                if row["status"] == "PARTIAL":
+                    line += " — the run stopped inside this workstream"
+                elif row["status"] == "NOT COVERED":
+                    line += " — not investigated"
+                lines.append(line)
+            lines.append("")
     for question in brief["questions"]:
         lines += [f"## {question['id']} — {question['text']}", ""]
         q_claims = [c for c in claims if c["question_id"] == question["id"]]
@@ -207,6 +253,8 @@ def compose_report(
     *,
     partial: bool = False,
     exceeded_kind: str | None = None,
+    exceeded_phase: str | None = None,
+    interrupted_questions: list[str] | tuple[str, ...] = (),
 ) -> dict:
     case_id = case["case_id"]
     brief = case["brief"]
@@ -226,11 +274,20 @@ def compose_report(
             }
         )
     entries = build_ledger(store, objects, case_id, claims)
+    coverage_detail = (
+        question_coverage(brief, claims, interrupted_questions)
+        if partial
+        else None
+    )
     report = {
         "case_id": case_id,
         "status": "DRAFT",
         "partial": partial,
         "exceeded_kind": exceeded_kind,
+        "exceeded_phase": exceeded_phase,
+        "interrupted_questions": list(interrupted_questions),
+        "coverage_detail": coverage_detail,
+        "approved_coverage": None,
         "markdown": _render_markdown(
             case,
             claims,
@@ -238,6 +295,8 @@ def compose_report(
             entries,
             partial=partial,
             exceeded_kind=exceeded_kind,
+            exceeded_phase=exceeded_phase,
+            coverage_detail=coverage_detail,
             refused=refused,
         ),
         "claims": claims,
@@ -291,6 +350,11 @@ def apply_verification(
         "verified_at": verifier_report["verified_at"],
     }
     evidence_count = store.count_evidence(case_id)
+    coverage_detail = (
+        question_coverage(brief, claims, report.get("interrupted_questions"))
+        if report["partial"]
+        else None
+    )
     report = {
         **report,
         "markdown": _render_markdown(
@@ -300,11 +364,14 @@ def apply_verification(
             entries,
             partial=report["partial"],
             exceeded_kind=report["exceeded_kind"],
+            exceeded_phase=report.get("exceeded_phase"),
+            coverage_detail=coverage_detail,
             refused=report["refused_claims"],
             verification=summary,
         ),
         "claims": claims,
         "coverage": _coverage(brief, claims),
+        "coverage_detail": coverage_detail,
         "ledger": {
             "entries": len(entries),
             "citations": sum(len(e["citations"]) for e in entries),
@@ -357,6 +424,8 @@ def apply_conflicts(
             entries,
             partial=report["partial"],
             exceeded_kind=report["exceeded_kind"],
+            exceeded_phase=report.get("exceeded_phase"),
+            coverage_detail=report.get("coverage_detail"),
             refused=report["refused_claims"],
             verification=report["verification"],
             conflicts=conflict_records,
