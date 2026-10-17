@@ -325,6 +325,93 @@ class Store:
         )
         return [json.loads(r["payload"]) for r in rows]
 
+    def delete_finding(self, case_id: str, finding_id: str) -> None:
+        self._execute(
+            "DELETE FROM findings WHERE case_id = ? AND finding_id = ?",
+            (case_id, finding_id),
+        )
+
+    # -- verifier -------------------------------------------------------------
+    def save_verifier_report(self, case_id: str, report: dict) -> dict:
+        existing = self.get_verifier_report(case_id)
+        if existing is None:
+            self._execute(
+                "INSERT INTO verifier_reports (case_id, payload, created_at)"
+                " VALUES (?, ?, ?)",
+                (case_id, json.dumps(report), report["verified_at"]),
+            )
+        else:
+            self._execute(
+                "UPDATE verifier_reports SET payload = ?, created_at = ?"
+                " WHERE case_id = ?",
+                (json.dumps(report), report["verified_at"], case_id),
+            )
+        return report
+
+    def get_verifier_report(self, case_id: str) -> dict | None:
+        row = self._fetchone(
+            "SELECT payload FROM verifier_reports WHERE case_id = ?", (case_id,)
+        )
+        return json.loads(row["payload"]) if row else None
+
+    def replace_quarantine(self, case_id: str, records: list[dict]) -> list[dict]:
+        # A fresh verification supersedes the previous quarantine set
+        # wholesale (analyst decisions on the old set live on in the
+        # audit trail); delete + inserts are one locked step so a
+        # reader never sees a half-written quarantine.
+        with self._lock:
+            self._conn.execute(
+                self._sql("DELETE FROM quarantine WHERE case_id = ?"),
+                (case_id,),
+            )
+            for record in records:
+                self._conn.execute(
+                    self._sql(
+                        "INSERT INTO quarantine"
+                        " (quarantine_id, case_id, claim_id, status, payload, created_at)"
+                        " VALUES (?, ?, ?, ?, ?, ?)"
+                    ),
+                    (
+                        record["quarantine_id"],
+                        case_id,
+                        record["claim_id"],
+                        record["status"],
+                        json.dumps(record),
+                        record["created_at"],
+                    ),
+                )
+            self._conn.commit()
+        return records
+
+    def list_quarantine(self, case_id: str) -> list[dict]:
+        rows = self._fetchall(
+            "SELECT payload FROM quarantine WHERE case_id = ?"
+            " ORDER BY quarantine_id",
+            (case_id,),
+        )
+        return [json.loads(r["payload"]) for r in rows]
+
+    def get_quarantine(self, case_id: str, quarantine_id: str) -> dict | None:
+        row = self._fetchone(
+            "SELECT payload FROM quarantine"
+            " WHERE case_id = ? AND quarantine_id = ?",
+            (case_id, quarantine_id),
+        )
+        return json.loads(row["payload"]) if row else None
+
+    def update_quarantine(self, case_id: str, record: dict) -> dict:
+        self._execute(
+            "UPDATE quarantine SET status = ?, payload = ?"
+            " WHERE case_id = ? AND quarantine_id = ?",
+            (
+                record["status"],
+                json.dumps(record),
+                case_id,
+                record["quarantine_id"],
+            ),
+        )
+        return record
+
     # -- virtual filesystem index ---------------------------------------------
     def put_file_meta(self, case_id: str, path: str, sha256: str, size: int) -> None:
         existing = self.get_file_meta(case_id, path)
