@@ -192,6 +192,29 @@ is accountable for lives in our code around it:
   raise, never below what the case has already consumed, that
   returns the case to APPROVED for re-execution while the original
   exhaustion stays in the ledger.
+- **Cost accounting: what a case cost, priced in code.** The same
+  guard records every model call as it ends — phase, role (the
+  main agent, or financial-scan / product-scan / market-scan),
+  model, and the token split — with the basis of the figures: a
+  real provider's returned usage is **measured**; the offline
+  stub's declared per-call figures are **estimated**, and are
+  labelled that way everywhere they surface. When a run ends, the
+  service prices its records against a governed price table
+  (`pricing/price-table.json` — per-model input/output rates held
+  as data, versioned like the harness profiles, loaded
+  fail-closed) and records the priced lines in the audit trail.
+  Each line carries the table version and the rates it was
+  computed with, so editing the table afterwards re-prices
+  nothing: the fold reads recorded lines only. The per-case
+  **budget-vs-actual** report (`GET /api/cases/{id}/cost`, and
+  the console's budget panel) joins the budget ledger's granted
+  vs consumed with the cost totals and their breakdowns by phase,
+  by sub-agent role, and by model — priced in Decimal, so the
+  parts sum to the total exactly, and the cost ledger's token
+  totals are the budget ledger's own tokens, not a second count.
+  A model the table does not list is recorded **unpriced** — its
+  tokens count, its cost is not invented — and `GET /api/costs`
+  sums every case's recorded ledger into the desk's total.
 - **Independent verification, before the gate.** A citation can
   resolve and still not support the claim — the figure can be
   overstated, the entity absent. So after composition, a verifier
@@ -418,7 +441,7 @@ the chain's schedule and handoff grade clean at recall **1.000**,
 and the failure variant's missing branch ends empty with its
 question NOT COVERED and the reason named, the case at
 DRAFT_READY. The pytest suite
-(190 tests) covers the gates, the budget caps, the evidence backend,
+(213 tests) covers the gates, the budget caps, the evidence backend,
 the citation rules, the ledger's drift gate, the verifier and
 quarantine, conflict detection and handling, per-phase budgets,
 the budget ledger, the partial-report protocol, amendment, the
@@ -441,7 +464,14 @@ that annotate the export without touching the report, and the
 analyst workbench: the queue derived per group from planted
 states with exact waits, recorded triage, the merged timeline,
 saved views, field-named search, and the route table's proof
-that no bulk decision exists.
+that no bulk decision exists, and cost accounting: the price
+table's fail-closed loader and grounded rates, the guard's
+per-call consumption records with their measured/estimated
+bases, the cost ledger folding exactly by phase, role, and model
+against the budget ledger's own token counts, the price-version
+pinning (an edited table moves nothing recorded), the unpriced
+model, and the budget-vs-actual report on the budget-tight case
+through amendment and re-run.
 
 The eval runner also runs the packs under any other profile —
 `python evals/run_evals.py --profile openai-gpt` — with the report
@@ -506,6 +536,17 @@ development profile needs none of it: SQLite at `./data/diligence.db`
   advisory only.
 - Budgets cap each run (planning and execution are guarded
   separately) rather than the case as a whole.
+- Costs are priced from the governed table's list rates, not from
+  a provider invoice: prompt-caching and batch discounts are not
+  modelled, so a discounted run's ledger figure reads high against
+  its bill, never low — and what a provider actually charged is a
+  finance record, not this ledger. The offline stub's dollars are
+  a shadow price for comparing runs, never a spend. The verifier's
+  optional advisory model check runs outside the harness runs and
+  the budget guard, so it has no consumption record and is not
+  costed; in the offline default it does not run at all. Cases run
+  before cost accounting existed carry no cost lines, and their
+  ledgers read empty rather than reconstructed.
 - A checkpoint's budget snapshot is the position at the last
   completed wave. A wave that dies mid-flight consumed steps the
   ledger never saw, and those are not reconstructed: resume
@@ -532,7 +573,12 @@ src/deep_diligence/
   llm.py          provider boundary (OpenAI-compatible, Anthropic, Ollama)
   schedule.py     workstream dependencies: gate validation, waves,
                   and the findings handoff
-  budgets.py      budget guard enforced in code around the harness
+  budgets.py      budget guard enforced in code around the harness;
+                  also records each model call for cost accounting
+  costs.py        cost accounting: the governed price table's
+                  strict loader, run-end pricing of the guard's
+                  per-call records, the cost ledger folded from
+                  the recorded lines, and the budget-vs-actual view
   tools.py        search_corpus / read_document / record_finding
   backend.py      virtual filesystem over the evidence store
   evidence.py     corpus ingestion with IDs, sources, hashes;
@@ -565,6 +611,9 @@ src/deep_diligence/
   static/         the console (one static HTML file)
 profiles/         the harness profile artifacts (offline-stub,
                   openai-gpt), versioned JSON, strictly validated
+pricing/          the governed price table (price-table.json):
+                  per-model input/output rates, versioned JSON,
+                  strictly validated like the profiles
 migrations/       numbered SQL migrations (+ sqlite/ variants)
 evals/            the gold case-pack gate (--profile for per-profile
                   runs) and promotion_controls.py, the gate's two

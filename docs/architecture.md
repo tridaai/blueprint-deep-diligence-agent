@@ -27,7 +27,8 @@ it, so they hold for any model the harness runs.
 | Profiles | `profiles.py`, `profiles/*.json` | Harness profile artifacts: strict fail-closed loader, prompt assembly from named sections, middleware the switches control |
 | Evaluation | `evaluation.py` | The case-pack grading (recall, citation, correctness, quarantine, conflicts), shared by the eval runner and the promotion gate |
 | Promotion gate | `promotion.py` | Split evaluation, worst-of-three verdicts against the incumbent's recorded baseline, file-hash evidence, append-only promotion/rollback records |
-| Budgets | `budgets.py` | Callback guard + budget ledger: per-phase step/token caps, case-level spawn/wall caps, grant/consume/exhaust/amend entries folded from the audit trail |
+| Budgets | `budgets.py` | Callback guard + budget ledger: per-phase step/token caps, case-level spawn/wall caps, grant/consume/exhaust/amend entries folded from the audit trail; the guard also records each model call (phase, role, model, token split, usage basis) for cost accounting |
+| Costs | `costs.py`, `pricing/price-table.json` | Cost accounting: the governed price table (per-model rates as versioned data, fail-closed loader), run-end pricing of the guard's records into `cost_recorded` ledger entries pinned to table version + rates, the cost fold by phase/role/model, and the budget-vs-actual view |
 | Schedule | `schedule.py` | Workstream dependencies: plan-gate graph validation, topological waves, and the findings handoff a dependent starts from |
 | Tools | `tools.py` | `search_corpus`, `read_document`, `record_finding` (citation rule) |
 | Backend | `backend.py` | Deep Agents filesystem protocol over the evidence store |
@@ -257,6 +258,70 @@ records the amendment (analyst, reason, previous and amended
 budgets) as a ledger entry and returns the case to `APPROVED`. The
 original exhaustion is never removed; grant, exhaustion,
 amendment, and the completing run's consumption read in order.
+
+## Cost accounting
+
+The budget ledger says what a case consumed; the cost ledger
+(`costs.py`) prices it, in the same recorded style — no new store
+table, everything folded from the audit trail.
+
+**Recording.** The BudgetGuard is the seam: at `on_llm_end` it
+already totalled a call's tokens for the budget, and it now also
+keeps a per-call consumption record — phase, role, model, and the
+input/output split. The role comes from the harness's own naming
+(the callback metadata's agent name: the planner's agent reads as
+the main agent, a sub-agent's roster name is its role; the
+assembled system prompt is the fallback), and the model from the
+provider boundary's label (`llm.model_label`, the same
+provider:model shape the price table keys on). A provider total
+that carries tokens its split does not itemise keeps the
+remainder as `other_tokens`: counted in the budget total, never
+priced as input or output. Each record carries the basis of its
+figures — `measured` when a real provider returned usage
+metadata, `estimated` for the offline stub's declared per-call
+figures (150 input tokens a call; 40 output for a tool call, 60
+for text — the stub's own scripted numbers, labelled estimated
+however they arrive) and for the character estimate used when a
+provider returns no usage at all. A record's token total is
+exactly the number the guard counted against the budget, so the
+cost ledger's tokens reconcile with the budget ledger's by
+construction, phase for phase.
+
+**Pricing.** Rates live in a governed price table,
+`pricing/price-table.json`: per-model input/output rates in USD
+per million tokens, held as exact decimal strings under a version
+stamp, loaded fail-closed at startup with the profile loader's
+discipline (unknown keys, duplicate models, float rates, an id
+that does not match the file all refuse). The shipped v1 prices
+the OpenAI and Anthropic defaults at their providers' published
+list rates (checked 2026-10-17), the self-hosted Ollama model at
+zero (no per-token charge exists; the table says why), and the
+offline stub at a shadow rate — the table's gpt-5.1 list rate —
+so offline runs can be compared with real ones, always labelled
+estimated. At the end of every run the service prices that run's
+records with Decimal arithmetic and writes a `cost_recorded`
+audit entry beside the `budget_consumed` checkpoint: the phase,
+the table's id + version, and the priced lines aggregated by
+(phase, role, model), each carrying its rates, its input/output
+costs, its usage basis, and — for a model the table does not
+list — `priced: false` with the reason, its tokens counted and
+its cost absent rather than invented.
+
+**The fold and the report.** `fold_cost_ledger` reads only
+`cost_recorded` entries and aggregates their lines into totals
+and breakdowns by phase, by role, and by model. It never consults
+the current price table: an edited or re-versioned table prices
+later runs only, and the versions a case was priced under are
+named on its report. There is no re-pricing view; the recorded
+ledger stands. `cost_view` joins that fold with the budget
+ledger's granted-vs-consumed (steps and tokens per phase, spawns
+and wall clock case-wide, exhaustions, amendments) into the
+per-case **budget-vs-actual** report — the API's
+`GET /api/cases/{id}/cost` and the console's cost block under its
+existing budget bars — with the estimated/measured label the
+case's figures carry. `GET /api/costs` sums every case's fold
+into an all-cases totals line; portfolio comparison across cases
+is round 15's work, not this round's.
 
 ## Parallel workstreams
 
@@ -593,7 +658,9 @@ as a recorded act. The audit
 trail records case creation, evidence ingestion, plan generation
 and decisions, sub-agent spawns, budget ledger entries (grants —
 each naming the profile the phase ran under — consumption
-checkpoints, exhaustions, amendments), composition, verification
+checkpoints, exhaustions, amendments), cost ledger entries (one
+`cost_recorded` per run: its priced lines, each pinned to the
+price-table version and rates that produced it), composition, verification
 and quarantine events, conflict detections and NOTED decisions,
 evidence-drift detections, and report decisions — plus the
 continuity events: mid-case evidence arrival and staleness
@@ -782,6 +849,14 @@ the hash check.
   check finds no evidence for the file as it stands and the gate
   refuses the rollback — the profile re-enters as a candidate
   through a fresh evaluation instead.
+- Cost accounting prices harness runs only. The verifier's
+  optional advisory model check is invoked outside a run (and
+  outside the budget guard), so it leaves no consumption record
+  to price; cases that ran before the cost ledger existed carry
+  no cost lines and are never reconstructed. The price table's
+  provider rates are published list rates, with caching and
+  batch discounts unmodelled — the ledger is a costing record
+  at governed rates, not a provider invoice.
 - Conflict detection is only as wide as the governed metric
   lexicon: a disagreement stated without a recognised metric,
   figure, or comparable value sits in the report as two findings and
