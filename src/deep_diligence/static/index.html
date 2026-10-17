@@ -136,7 +136,7 @@ async function openCase(caseId) {
       ${bar("Steps", phase.consumed.steps, phase.granted.max_steps)}
       ${bar("Tokens", phase.consumed.tokens, phase.granted.max_tokens)}`;
   };
-  const [plan, findings, evidence, audit, report, ledger, verification, quarantine, conflicts] = await Promise.all([
+  const [plan, findings, evidence, audit, report, ledger, verification, quarantine, conflicts, workstreams] = await Promise.all([
     api(`/api/cases/${caseId}/plan`).catch(() => null),
     api(`/api/cases/${caseId}/findings`),
     api(`/api/cases/${caseId}/evidence`),
@@ -146,6 +146,7 @@ async function openCase(caseId) {
     api(`/api/cases/${caseId}/verification`).catch(() => null),
     api(`/api/cases/${caseId}/quarantine`).catch(() => []),
     api(`/api/cases/${caseId}/conflicts`).catch(() => []),
+    api(`/api/cases/${caseId}/workstreams`).catch(() => []),
   ]);
   const driftIds = new Set(((ledger && ledger.verification && ledger.verification.drift) || []).map(d => d.evidence_id));
   const canPlan = ["INTAKE", "PLAN_REJECTED"].includes(c.status);
@@ -210,8 +211,10 @@ async function openCase(caseId) {
         <div id="ev-view"></div>
       </div>
       <div class="panel"><h3>Report draft ${report ? `(${esc(report.status)}${report.partial ? ", partial" : ""})` : ""}</h3>
-        ${report && report.coverage_detail ? `<div style="margin-bottom:10px"><div class="muted">Coverage (partial report — stopped on its ${esc(report.exceeded_kind || "budget")} budget during ${esc(report.exceeded_phase || "execution")})</div>
-          ${report.coverage_detail.map(r => `<div class="finding"><strong>${esc(r.question_id)}</strong> — ${esc(r.status)} (${r.findings} finding(s))</div>`).join("")}
+        ${workstreams && workstreams.length ? `<div style="margin-bottom:10px"><div class="muted">Workstreams (the schedule's execution record)</div>
+          ${workstreams.map(w => `<div class="finding"><strong>${esc(w.question_id)}</strong> (${esc(w.workstream)}) — ${esc(w.status)} (${w.findings} finding(s))${w.reason ? ` — ${esc(w.reason)}` : ""}</div>`).join("")}</div>` : ""}
+        ${report && report.coverage_detail ? `<div style="margin-bottom:10px"><div class="muted">${report.partial ? `Coverage (partial report — stopped on its ${esc(report.exceeded_kind || "budget")} budget during ${esc(report.exceeded_phase || "execution")})` : "Coverage (a workstream did not complete — the reason is named on its row)"}</div>
+          ${report.coverage_detail.map(r => `<div class="finding"><strong>${esc(r.question_id)}</strong> — ${esc(r.status)} (${r.findings} finding(s))${r.reason ? ` — ${esc(r.reason)}` : ""}</div>`).join("")}
           ${report.approved_coverage ? `<div class="muted">This coverage is what the approving analyst approved.</div>` : ""}</div>` : ""}
         ${report ? `<div class="md">${md(report.markdown)}</div>` : '<p class="muted">No report yet.</p>'}
       </div>
