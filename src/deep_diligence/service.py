@@ -20,7 +20,7 @@ from langchain_core.messages import HumanMessage
 
 from .backend import EvidenceBackend
 from .budgets import BudgetExceededError, BudgetGuard
-from .composer import compose_report
+from .composer import apply_verification, compose_report
 from .config import Settings
 from .corpus import companies
 from .evidence import ingest_case_evidence
@@ -31,6 +31,7 @@ from .models import BriefIn
 from .objects import ObjectStore, build_object_store
 from .store import Store, build_store, utcnow
 from .tools import build_case_tools
+from .verifier import verify_case
 
 log = logging.getLogger("deep_diligence.service")
 
@@ -193,6 +194,7 @@ class CaseService:
             self.store.add_audit(
                 case_id, "report_composed", {"partial": True, "usage": usage}
             )
+            report = self._verify_draft(case, report)
             self.store.update_case(case_id, status="BUDGET_EXHAUSTED")
             log.info("case %s budget exhausted (%s)", case_id, error.kind)
             return report
@@ -200,9 +202,127 @@ class CaseService:
         self.store.add_audit(
             case_id, "report_composed", {"partial": False, "usage": usage}
         )
+        report = self._verify_draft(case, report)
         self.store.update_case(case_id, status="DRAFT_READY")
         log.info("case %s draft ready", case_id)
         return report
+
+    # -- verification ---------------------------------------------------------
+    def _verify_draft(self, case: dict, report: dict) -> dict:
+        """The independent verifier pass, between composition and the
+        analyst gate. Quarantined claims leave the report body here;
+        what reaches the analyst is the verified draft, the verifier
+        summary, and the quarantine record."""
+        case_id = case["case_id"]
+        model = None
+        model_name = None
+        if self.settings.llm_backend != "offline":
+            model = build_model(self.settings)
+            model_name = {
+                "openai": self.settings.openai_model,
+                "anthropic": self.settings.anthropic_model,
+                "ollama": self.settings.ollama_model,
+            }.get(self.settings.llm_backend)
+        result = verify_case(
+            self.store,
+            self.objects,
+            case_id,
+            model=model,
+            model_name=model_name,
+        )
+        self.store.add_audit(
+            case_id,
+            "verification_completed",
+            {
+                "run_id": result["run_id"],
+                "checked": result["checked"],
+                "supported": result["supported"],
+                "quarantined": result["quarantined"],
+                "by_reason": result["by_reason"],
+            },
+        )
+        records = self.store.list_quarantine(case_id)
+        if records:
+            self.store.add_audit(
+                case_id,
+                "claims_quarantined",
+                {
+                    "claims": [
+                        {"claim_id": r["claim_id"], "reason": r["reason"]}
+                        for r in records
+                    ]
+                },
+            )
+        report = apply_verification(
+            self.store, self.objects, case, report, result, records
+        )
+        log.info(
+            "case %s verified: %d checked, %d supported, %d quarantined",
+            case_id,
+            result["checked"],
+            result["supported"],
+            result["quarantined"],
+        )
+        return report
+
+    def decide_quarantine(
+        self,
+        case_id: str,
+        quarantine_id: str,
+        analyst: str,
+        action: str,
+        note: str = "",
+    ) -> dict:
+        """An analyst's two moves on a quarantined claim — and only two.
+
+        There is deliberately no "approve into the report" move: a
+        claim the verifier quarantined can be sent back for
+        re-investigation (the case returns to APPROVED, ready to
+        execute again, with the analyst's note in the audit trail) or
+        dropped. Either way the underlying finding leaves the case
+        record, so the claim cannot quietly re-enter a later draft —
+        a re-investigation has to re-derive it from the evidence.
+        """
+        case = self._require_case(case_id)
+        if case["status"] not in ("DRAFT_READY", "BUDGET_EXHAUSTED"):
+            raise GateError(
+                f"no report at the gate to decide quarantine from "
+                f"(status {case['status']})"
+            )
+        if action not in ("reinvestigate", "drop"):
+            raise ValueError(
+                f"unknown quarantine action {action!r}; "
+                "expected 'reinvestigate' or 'drop'"
+            )
+        record = self.store.get_quarantine(case_id, quarantine_id)
+        if record is None:
+            raise KeyError(quarantine_id)
+        if record["status"] != "QUARANTINED":
+            raise GateError(
+                f"quarantine record {quarantine_id} is already "
+                f"{record['status']}"
+            )
+        record["status"] = "SENT_BACK" if action == "reinvestigate" else "DROPPED"
+        record["decided_by"] = analyst
+        record["decision_note"] = note
+        record["decided_at"] = utcnow()
+        self.store.update_quarantine(case_id, record)
+        self.store.delete_finding(case_id, record["finding_id"])
+        self.store.add_audit(
+            case_id,
+            "claim_sent_back" if action == "reinvestigate" else "claim_dropped",
+            {
+                "quarantine_id": quarantine_id,
+                "claim_id": record["claim_id"],
+                "finding_id": record["finding_id"],
+                "reason": record["reason"],
+                "analyst": analyst,
+                "note": note,
+            },
+        )
+        if action == "reinvestigate":
+            self.store.update_case(case_id, status="APPROVED")
+        return record
 
     def decide_report(self, case_id: str, analyst: str, approve: bool, note: str = "") -> dict:
         case = self._require_case(case_id)
