@@ -412,6 +412,66 @@ class Store:
         )
         return record
 
+    # -- conflicts ------------------------------------------------------------
+    def replace_conflicts(self, case_id: str, records: list[dict]) -> list[dict]:
+        # A fresh detection pass supersedes the previous conflict set
+        # wholesale (analyst NOTED decisions on the old set live on in
+        # the audit trail); delete + inserts are one locked step so a
+        # reader never sees a half-written set. Conflicts are never
+        # deleted within a report's life by any analyst action — this
+        # replacement happens only when a new draft is verified.
+        with self._lock:
+            self._conn.execute(
+                self._sql("DELETE FROM conflicts WHERE case_id = ?"),
+                (case_id,),
+            )
+            for record in records:
+                self._conn.execute(
+                    self._sql(
+                        "INSERT INTO conflicts"
+                        " (conflict_id, case_id, status, payload, created_at)"
+                        " VALUES (?, ?, ?, ?, ?)"
+                    ),
+                    (
+                        record["conflict_id"],
+                        case_id,
+                        record["status"],
+                        json.dumps(record),
+                        record["created_at"],
+                    ),
+                )
+            self._conn.commit()
+        return records
+
+    def list_conflicts(self, case_id: str) -> list[dict]:
+        rows = self._fetchall(
+            "SELECT payload FROM conflicts WHERE case_id = ?"
+            " ORDER BY conflict_id",
+            (case_id,),
+        )
+        return [json.loads(r["payload"]) for r in rows]
+
+    def get_conflict(self, case_id: str, conflict_id: str) -> dict | None:
+        row = self._fetchone(
+            "SELECT payload FROM conflicts"
+            " WHERE case_id = ? AND conflict_id = ?",
+            (case_id, conflict_id),
+        )
+        return json.loads(row["payload"]) if row else None
+
+    def update_conflict(self, case_id: str, record: dict) -> dict:
+        self._execute(
+            "UPDATE conflicts SET status = ?, payload = ?"
+            " WHERE case_id = ? AND conflict_id = ?",
+            (
+                record["status"],
+                json.dumps(record),
+                case_id,
+                record["conflict_id"],
+            ),
+        )
+        return record
+
     # -- virtual filesystem index ---------------------------------------------
     def put_file_meta(self, case_id: str, path: str, sha256: str, size: int) -> None:
         existing = self.get_file_meta(case_id, path)
