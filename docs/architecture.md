@@ -24,7 +24,7 @@ it, so they hold for any model the harness runs.
 | Service | `service.py` | Case lifecycle state machine; the plan/report gates |
 | Harness wiring | `harness.py` | `create_deep_agent` with planner + 3 workstream sub-agents |
 | Prompts | `harness.py` | Planner and workstream system prompts (phase/workstream markers) |
-| Budgets | `budgets.py` | Callback guard: steps, sub-agents, tokens, wall clock |
+| Budgets | `budgets.py` | Callback guard + budget ledger: per-phase step/token caps, case-level spawn/wall caps, grant/consume/exhaust/amend entries folded from the audit trail |
 | Tools | `tools.py` | `search_corpus`, `read_document`, `record_finding` (citation rule) |
 | Backend | `backend.py` | Deep Agents filesystem protocol over the evidence store |
 | Evidence | `evidence.py` | Corpus ingestion: IDs, source, hash, retrieval time |
@@ -47,7 +47,10 @@ INTAKE → (planning run) → PLAN_READY → approve → APPROVED
 Rejection at either gate parks the case in `PLAN_REJECTED` /
 `REPORT_REJECTED`, from which the phase may run again (a re-plan mints
 plan version n+1). A budget-exhausted execution composes a **partial**
-draft and lands in `BUDGET_EXHAUSTED`; the report gate still applies.
+draft and lands in `BUDGET_EXHAUSTED`; the report gate still applies,
+and the analyst has one further move from that state — **amend the
+budget** (a recorded raise, never below what the case has already
+consumed), which returns the case to `APPROVED` for re-execution.
 
 ## A run, step by step
 
@@ -133,10 +136,50 @@ it. Counters: model steps (deduplicated on run id, because chat
 models fire `on_chat_model_start` and some stacks also fire
 `on_llm_start`), tokens (from `usage_metadata`, with a character
 estimate when a provider omits it), `task` spawns, and wall clock.
-Caps apply **per run** — planning and execution are each guarded by
-the case budget. Exhaustion is an audit event, and the partial-report
-protocol names the uncovered questions rather than truncating
-silently.
+
+The brief's budget has a **phase structure**. Steps and tokens are
+per-phase caps: `resolve_phase_budget` resolves the caps for the
+planning run and the execution run independently — a phase override
+in the brief wins, an unset field derives from the brief's flat
+value, so a brief written before phases existed resolves exactly as
+it used to. Spawns and wall clock are **case-level** caps, consumed
+across phases: the guard is seeded with the case's prior consumption
+(folded from the ledger) and checks `task` spawns and elapsed wall
+time against prior-plus-current, so a re-execution cannot re-spend
+spawns an earlier attempt already used.
+
+Every budget-relevant event is a **ledger entry** in the case's
+audit trail, in order: `budget_granted` (phase, its resolved caps,
+the case caps) when a phase run starts; the guard's own
+`subagent_spawned` and `budget_exceeded` events (the exceeded entry
+names the cap, the phase, the limit, the observed count, and a
+usage snapshot); `budget_consumed` (the run's final usage) when the
+run ends; and `budget_amended` when an analyst amends.
+`fold_budget_ledger` folds those entries into per-phase and
+case-level consumption, and `GET /api/cases/{id}/budget` renders
+granted-vs-consumed from that fold — there is no separate mutable
+counter that could drift from the ledger.
+
+**Partial-report protocol.** When execution stops on a cap, the
+composer itemises coverage per brief question, derived in code from
+the report's claims and the plan's workstream mapping: ANSWERED
+(findings in the report, workstream not interrupted), PARTIAL
+(findings exist, but the run stopped mid-workstream — the guard
+tracks which `task` calls were still open when the cap tripped,
+and the service maps those spawns back to questions through the
+plan's workstream order), or NOT COVERED (no findings recorded).
+The banner names the exhausted cap and phase; the table rides on
+the report record as `coverage_detail`. Approving a partial report
+stamps that table onto the approval record.
+
+**Amendment.** From `BUDGET_EXHAUSTED` only, an analyst may amend
+the budget with a recorded reason. The service refuses any cap set
+below what the ledger says the case already consumed — per phase
+for steps and tokens, case-wide for spawns and wall clock — then
+records the amendment (analyst, reason, previous and amended
+budgets) as a ledger entry and returns the case to `APPROVED`. The
+original exhaustion is never removed; grant, exhaustion,
+amendment, and the completing run's consumption read in order.
 
 ## The virtual filesystem
 
@@ -157,9 +200,10 @@ Payload-JSON tables, Postgres and SQLite variants of the same schema
 `citation_ledger`, `verifier_reports`, `quarantine`, `conflicts`,
 `case_files`, `audit`. The audit trail records case creation,
 evidence ingestion, plan generation and decisions, sub-agent spawns,
-budget events, composition, verification and quarantine events,
-conflict detections and NOTED decisions, evidence-drift detections,
-and report decisions.
+budget ledger entries (grants, consumption checkpoints,
+exhaustions, amendments), composition, verification and quarantine
+events, conflict detections and NOTED decisions, evidence-drift
+detections, and report decisions.
 
 ## Models
 

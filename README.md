@@ -105,12 +105,27 @@ is accountable for lives in our code around it:
   time. The report's References section is generated from the ledger,
   and the ledger is queryable in the console and at
   `GET /api/cases/{id}/ledger`.
-- **Budgets in code.** Each run is wrapped by a callback guard that
-  counts model steps, sub-agent spawns, tokens, and wall-clock time
-  against the brief's budget. Crossing a cap aborts the run; the
-  findings recorded so far survive, and the composer produces a
-  partial report that names the questions it did not cover instead
-  of truncating silently.
+- **Budgets in code, per phase, on a ledger.** Each run is wrapped
+  by a callback guard that counts model steps, sub-agent spawns,
+  tokens, and wall-clock time. Steps and tokens are per-phase caps —
+  the brief can give the planning run and the execution run
+  different limits, and an unset phase field derives from the
+  brief's flat value — while spawns and wall clock are case-level
+  caps consumed across both phases, seeded from what the case has
+  already spent. Crossing a cap aborts the run; the findings
+  recorded so far survive, and the composer produces a partial
+  report whose banner names the cap and the phase that stopped,
+  with coverage itemised per question: ANSWERED, PARTIAL (findings
+  exist but the run stopped mid-workstream), or NOT COVERED. Every
+  budget event — the grant a phase runs under, its consumption
+  checkpoint, an exhaustion, an amendment — is an entry in the
+  case's audit-trail budget ledger, and the console's budget view
+  is folded from that ledger, not from counters. An analyst may
+  approve a partial report (the approval record carries the
+  coverage table it approved) or **amend the budget**: a recorded
+  raise, never below what the case has already consumed, that
+  returns the case to APPROVED for re-execution while the original
+  exhaustion stays in the ledger.
 - **Independent verification, before the gate.** A citation can
   resolve and still not support the claim — the figure can be
   overstated, the entity absent. So after composition, a verifier
@@ -191,6 +206,12 @@ offline model and grades:
   between documents; each must yield exactly one conflict record
   carrying both gold values, and no pack may yield any other
   conflict (period-distinct facts are graded as non-conflicts)
+- **Budget hardening** — a fifth case runs a gold brief with an
+  execution step cap sized to exhaust mid-run: the case must land
+  in BUDGET_EXHAUSTED with a partial report whose coverage table
+  names at least one NOT COVERED question, no cap may be violated,
+  an amendment below consumption must be refused, and a recorded
+  amendment plus re-run must reach DRAFT_READY with full recall
 
 Current results (offline stub): recall **1.000** on all four cases,
 citation completeness and correctness **1.000**, budgets compliant;
@@ -200,10 +221,15 @@ claims. Each pack's planted contradiction yields exactly its one
 conflict record — $412M vs $421M (Helvion revenue), 1,150 vs 1,300
 (Copperline headcount), 25 vs 41 minutes (Selene result time),
 $186M vs $171M (Aster revenue, audited filing against its stale
-preliminary release) — and no other conflicts. The pytest suite
-(52 tests) covers the gates, the budget caps, the evidence backend,
+preliminary release) — and no other conflicts. The budget case
+exhausts on its step cap during execution, refuses a
+below-consumption amendment, and after amendment re-runs to
+DRAFT_READY with recall **1.000**. The pytest suite
+(67 tests) covers the gates, the budget caps, the evidence backend,
 the citation rules, the ledger's drift gate, the verifier and
-quarantine, and conflict detection and handling separately.
+quarantine, conflict detection and handling, per-phase budgets,
+the budget ledger, the partial-report protocol, and amendment
+separately.
 
 ## Production profile
 
