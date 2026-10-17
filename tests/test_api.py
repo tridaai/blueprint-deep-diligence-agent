@@ -72,3 +72,79 @@ def test_unknown_case_404(client):
 
 def test_invalid_brief_422(client):
     assert client.post("/api/cases", json={"subject": "x"}).status_code == 422
+
+
+def test_budget_view_and_amendment_over_http(client):
+    brief = {
+        **GOLD_CASES[0]["brief"],
+        "budget": {
+            **GOLD_CASES[0]["brief"]["budget"],
+            "execution": {"max_steps": 6},
+        },
+    }
+    created = client.post("/api/cases", json=brief)
+    assert created.status_code == 201
+    case_id = created.json()["case_id"]
+    client.post(f"/api/cases/{case_id}/plan")
+    client.post(
+        f"/api/cases/{case_id}/plan/decision",
+        json={"analyst": "API Tester", "approve": True, "note": ""},
+    )
+    report = client.post(f"/api/cases/{case_id}/execute")
+    assert report.status_code == 200
+    assert report.json()["partial"] is True
+    assert report.json()["exceeded_phase"] == "execution"
+    assert report.json()["coverage_detail"]
+
+    # Amendment from any other state is a 409; here the case is
+    # exhausted, so the state is right but a below-consumption cap
+    # is a 422.
+    body = client.get(f"/api/cases/{case_id}/budget").json()
+    view = body["view"]
+    assert view["phases"]["execution"]["granted"] == {
+        "max_steps": 6,
+        "max_tokens": 400000,
+    }
+    assert view["exhaustions"][0]["kind"] == "steps"
+    consumed_steps = view["phases"]["execution"]["consumed"]["steps"]
+    refused = client.post(
+        f"/api/cases/{case_id}/budget/amendment",
+        json={
+            "analyst": "API Tester",
+            "reason": "Too low, on purpose",
+            "budget": {
+                **GOLD_CASES[0]["brief"]["budget"],
+                "execution": {"max_steps": consumed_steps - 1},
+            },
+        },
+    )
+    assert refused.status_code == 422
+
+    amended = client.post(
+        f"/api/cases/{case_id}/budget/amendment",
+        json={
+            "analyst": "API Tester",
+            "reason": "The step cap under-scoped the brief",
+            "budget": {
+                **GOLD_CASES[0]["brief"]["budget"],
+                "execution": {"max_steps": 120},
+            },
+        },
+    )
+    assert amended.status_code == 200
+    assert amended.json()["status"] == "APPROVED"
+
+    # The case is no longer exhausted: a second amendment is a 409.
+    again = client.post(
+        f"/api/cases/{case_id}/budget/amendment",
+        json={
+            "analyst": "API Tester",
+            "reason": "Once more",
+            "budget": GOLD_CASES[0]["brief"]["budget"],
+        },
+    )
+    assert again.status_code == 409
+
+    report = client.post(f"/api/cases/{case_id}/execute")
+    assert report.status_code == 200
+    assert report.json()["partial"] is False

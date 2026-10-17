@@ -74,3 +74,28 @@ def test_record_finding_tool_enforces_citations(service, case):
     )
     assert again.startswith("Already recorded")
     assert service.store.count_findings(case["case_id"]) == 1
+
+
+def test_question_coverage_assigns_statuses_in_code():
+    from deep_diligence.composer import question_coverage
+
+    brief = {"questions": [{"id": "q1"}, {"id": "q2"}, {"id": "q3"}]}
+    claims = [
+        {"question_id": "q1"},
+        {"question_id": "q1"},
+        {"question_id": "q2"},
+    ]
+    detail = question_coverage(brief, claims, interrupted_questions=["q2"])
+    assert detail == [
+        {"question_id": "q1", "status": "ANSWERED", "findings": 2},
+        {"question_id": "q2", "status": "PARTIAL", "findings": 1},
+        {"question_id": "q3", "status": "NOT COVERED", "findings": 0},
+    ]
+
+
+def test_question_coverage_interrupted_without_findings_is_not_covered():
+    from deep_diligence.composer import question_coverage
+
+    brief = {"questions": [{"id": "q1"}, {"id": "q2"}]}
+    detail = question_coverage(brief, [], interrupted_questions=["q1", "q2"])
+    assert all(row["status"] == "NOT COVERED" for row in detail)
