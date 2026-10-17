@@ -12,7 +12,8 @@ persisted report, and for every claim it fetches the cited evidence
 bytes directly from the object store by ID and re-derives support
 itself. It never reads the composer's in-memory structures or the
 citation ledger — delete the ledger and the verifier's verdicts do
-not change.
+not change. Redacted evidence (governance.py) is treated as
+missing: its bytes are a marker, and a marker supports no claim.
 
 The gate checks are deterministic: every figure (money, percentages,
 counts) and every date a claim states must appear in the evidence it
@@ -220,6 +221,18 @@ def verify_case(
         texts: list[str] = []
         for evidence_id in claim["evidence_ids"]:
             ev = store.get_evidence(case_id, evidence_id)
+            if ev is not None and ev.get("redacted"):
+                # A redacted item's bytes are a governance marker,
+                # not evidence: the claim is unverifiable against
+                # it, exactly as if the item were missing — the
+                # marker's own text must never "support" a figure.
+                failures.append(
+                    {
+                        "reason": "evidence_missing",
+                        "detail": f"cited evidence {evidence_id} has been redacted; a redaction marker cannot support a claim",
+                    }
+                )
+                continue
             data: bytes | None = None
             if ev is not None:
                 try:

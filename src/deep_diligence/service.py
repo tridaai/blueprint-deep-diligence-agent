@@ -36,6 +36,17 @@ from .config import Settings
 from .continuity import stale_questions
 from .corpus import companies
 from .evidence import add_evidence_document, ingest_case_evidence
+from .governance import (
+    SOURCE_KINDS,
+    USAGE_BASES,
+    brief_source_problems,
+    case_provenance,
+    case_source_policy,
+    parse_ts,
+    redaction_marker,
+    retention_due,
+    seed_sources,
+)
 from .harness import build_agent, execute_message, plan_message
 from .ledger import verify_ledger
 from .llm import build_model
@@ -93,6 +104,12 @@ class CaseService:
         # fallback). The model is injected separately by the provider
         # boundary; the profile is configuration.
         self.store: Store = build_store(settings)
+        # The source registry is seeded from the corpus before any
+        # case work: evidence ingestion refuses unregistered
+        # sources, and the corpus is the desk's standing universe,
+        # so its sources are registered up front (idempotently —
+        # analyst-registered records are never overwritten).
+        seed_sources(self.store)
         self.profile = self._resolve_active_profile()
         self.gate = ProfileGate(self.store, settings.profile_dir)
         self.objects: ObjectStore = build_object_store(settings)
@@ -256,6 +273,14 @@ class CaseService:
                 f"unknown subject_ref {brief.subject_ref!r}; "
                 f"the offline corpus covers {sorted(known)}"
             )
+        # Brief source policy, fail closed: every allowed_sources
+        # entry must resolve — a registered source, a corpus
+        # document, or a document kind. An entry that names
+        # nothing would silently scope the case to a subset (or
+        # to nothing); the brief is refused, with the entry named.
+        problems = brief_source_problems(self.store, brief.model_dump())
+        if problems:
+            raise ValueError("; ".join(problems))
         case_id = f"case-{uuid.uuid4().hex[:10]}"
         now = utcnow()
         case = {
@@ -272,6 +297,12 @@ class CaseService:
             # decisions. Both start empty on every case.
             "stale_marks": [],
             "staleness_decisions": [],
+            # Source governance (R10): the retention class and the
+            # record of hold acts on the case. Every case starts on
+            # standard retention; a legal hold is an analyst act,
+            # recorded here and in the audit trail.
+            "retention_class": "standard",
+            "retention_history": [],
             # The profile stamp: this case's planning and execution
             # run under this profile (id + version), and the case
             # view shows it.
@@ -1308,6 +1339,350 @@ class CaseService:
         )
         return note
 
+    # -- source governance ------------------------------------------------------
+    def register_source(
+        self,
+        analyst: str,
+        *,
+        name: str,
+        kind: str,
+        owner: str,
+        usage_basis: str,
+        notes: str = "",
+    ) -> dict:
+        """Register a source in the governance registry.
+
+        Registration is a recorded act, not a config edit: the
+        record carries the analyst, the moment, and its own act
+        history. Until a source is registered, no evidence — from
+        the corpus or from an analyst's upload — may cite it.
+        """
+        if not name or not name.strip():
+            raise ValueError("a source needs a name")
+        if kind not in SOURCE_KINDS:
+            raise ValueError(
+                f"unknown source kind {kind!r}; "
+                f"expected one of {', '.join(SOURCE_KINDS)}"
+            )
+        if usage_basis not in USAGE_BASES:
+            raise ValueError(
+                f"unknown usage basis {usage_basis!r}; "
+                f"expected one of {', '.join(USAGE_BASES)}"
+            )
+        if not owner or not owner.strip():
+            raise ValueError("a source needs an owner")
+        name = name.strip()
+        if self.store.get_source(name) is not None:
+            raise GateError(f"source {name!r} is already registered")
+        record = {
+            "name": name,
+            "kind": kind,
+            "owner": owner.strip(),
+            "usage_basis": usage_basis,
+            "notes": notes,
+            "registered_by": analyst,
+            "registered_at": utcnow(),
+            "history": [
+                {"action": "registered", "analyst": analyst, "at": utcnow()}
+            ],
+        }
+        log.info("source %s registered by %s", name, analyst)
+        return self.store.add_source(record)
+
+    def case_sources(self, case_id: str) -> dict:
+        """The governance records behind a case's sources: what
+        the brief allowed, resolved entry by entry, and what the
+        evidence actually came from (governance.case_source_policy)."""
+        case = self._require_case(case_id)
+        return case_source_policy(self.store, case)
+
+    def case_provenance(self, case_id: str) -> dict:
+        """The per-case provenance report (governance.case_provenance):
+        every evidence item with its source's governance record,
+        its hash, its ingestion path, and its citing findings and
+        claims."""
+        case = self._require_case(case_id)
+        return case_provenance(self.store, case)
+
+    def retention_sweep(self) -> list[dict]:
+        """Cases past their retention period, listed for an
+        analyst's decision. The sweep is a report, never an act:
+        it deletes nothing, holds nothing, and changes no state —
+        it names the standard-retention cases whose retention
+        (policy: RETENTION_DAYS from creation) has run out.
+        Cases under legal hold are never listed."""
+        now = parse_ts(utcnow())
+        due: list[dict] = []
+        for case in self.store.list_cases():
+            if (case.get("retention_class") or "standard") != "standard":
+                continue
+            due_at = retention_due(case, self.settings.retention_days)
+            if now >= due_at:
+                due.append(
+                    {
+                        "case_id": case["case_id"],
+                        "subject": case["subject"],
+                        "status": case["status"],
+                        "created_at": case["created_at"],
+                        "retention_class": "standard",
+                        "retention_due_at": due_at.isoformat(
+                            timespec="seconds"
+                        ),
+                    }
+                )
+        return due
+
+    def set_legal_hold(
+        self, case_id: str, analyst: str, hold: bool, reason: str = ""
+    ) -> dict:
+        """Set or clear a case's legal hold — a recorded analyst
+        act either way (the act, the analyst, the reason, and the
+        moment land on the case record and in the audit trail).
+        While the hold stands, deletion refuses in code."""
+        case = self._require_case(case_id)
+        current = case.get("retention_class") or "standard"
+        if hold and current == "legal_hold":
+            raise GateError(f"case {case_id} is already under legal hold")
+        if not hold and current != "legal_hold":
+            raise GateError(f"case {case_id} is not under legal hold")
+        entry = {
+            "action": "set" if hold else "cleared",
+            "analyst": analyst,
+            "reason": reason,
+            "at": utcnow(),
+        }
+        history = list(case.get("retention_history") or [])
+        history.append(entry)
+        case = self.store.update_case(
+            case_id,
+            retention_class="legal_hold" if hold else "standard",
+            retention_history=history,
+        )
+        self.store.add_audit(
+            case_id,
+            "legal_hold_set" if hold else "legal_hold_cleared",
+            entry,
+        )
+        log.info(
+            "case %s legal hold %s by %s",
+            case_id,
+            "set" if hold else "cleared",
+            analyst,
+        )
+        return case
+
+    def delete_case(self, case_id: str, analyst: str, reason: str) -> dict:
+        """End a case: the deletion act.
+
+        Explicit and recorded: a named analyst, a stated reason.
+        The case's rows and its objects (evidence originals and
+        case files alike) are removed, and a tombstone is all
+        that remains — case id, subject, who deleted it and why
+        and when, how much evidence it held, and the hash of the
+        final report it carried, if it carried one. A case under
+        legal hold refuses here, in code, however it is asked.
+        """
+        if not reason or not reason.strip():
+            raise ValueError("deleting a case requires a recorded reason")
+        case = self._require_case(case_id)
+        if (case.get("retention_class") or "standard") == "legal_hold":
+            raise GateError(
+                f"case {case_id} is under legal hold and cannot be "
+                "deleted; clear the hold first, as its own recorded act"
+            )
+        report = self.store.get_report(case_id)
+        final_hash = None
+        if report is not None and report.get("markdown"):
+            final_hash = sha256_hex(report["markdown"].encode("utf-8"))
+        evidence_count = self.store.count_evidence(case_id)
+        for key in self.objects.list_keys(f"cases/{case_id}/"):
+            self.objects.delete(key)
+        self.store.delete_case_data(case_id)
+        tombstone = self.store.add_tombstone(
+            {
+                "case_id": case_id,
+                "subject": case["subject"],
+                "subject_ref": case["subject_ref"],
+                "deleted_by": analyst,
+                "reason": reason.strip(),
+                "deleted_at": utcnow(),
+                "final_report_sha256": final_hash,
+                "evidence_count": evidence_count,
+            }
+        )
+        log.info(
+            "case %s deleted by %s: %s", case_id, analyst, reason.strip()
+        )
+        return tombstone
+
+    def redact_evidence(
+        self, case_id: str, evidence_id: str, analyst: str, reason: str
+    ) -> dict:
+        """Redact one evidence item, for a recorded reason.
+
+        The stored bytes are replaced by a content-free marker;
+        the redaction record keeps the item's original SHA-256,
+        the reason, and the analyst — never the content. Claims in
+        the case's live report that cite the item are flagged:
+        until each is acknowledged or sent back, the report cannot
+        be approved. The verifier treats a redacted item as
+        missing from here on — a marker supports no claim.
+        """
+        if not reason or not reason.strip():
+            raise ValueError("redacting evidence requires a recorded reason")
+        self._require_case(case_id)
+        ev = self.store.get_evidence(case_id, evidence_id)
+        if ev is None:
+            raise KeyError(evidence_id)
+        if ev.get("redacted"):
+            raise GateError(
+                f"evidence {evidence_id} is already redacted"
+            )
+        at = utcnow()
+        original_sha = ev["sha256"]
+        redaction = self.store.add_redaction(
+            case_id,
+            {
+                "evidence_id": evidence_id,
+                "title": ev["title"],
+                "original_sha256": original_sha,
+                "analyst": analyst,
+                "reason": reason.strip(),
+                "redacted_at": at,
+            },
+        )
+        self.objects.put(
+            ev["object_key"],
+            redaction_marker(ev, analyst, reason.strip(), at).encode("utf-8"),
+        )
+        ev["redacted"] = True
+        ev["redaction"] = {
+            "redaction_id": redaction["redaction_id"],
+            "analyst": analyst,
+            "reason": reason.strip(),
+            "redacted_at": at,
+            "original_sha256": original_sha,
+        }
+        self.store.update_evidence(case_id, ev)
+        self.store.add_audit(
+            case_id,
+            "evidence_redacted",
+            {
+                "redaction_id": redaction["redaction_id"],
+                "evidence_id": evidence_id,
+                "original_sha256": original_sha,
+                "analyst": analyst,
+                "reason": reason.strip(),
+            },
+        )
+        flags: list[dict] = []
+        report = self.store.get_report(case_id)
+        if report is not None:
+            for claim in report.get("claims", []):
+                if evidence_id in claim.get("evidence_ids", []):
+                    flags.append(
+                        self.store.add_redaction_flag(
+                            case_id,
+                            {
+                                "claim_id": claim["claim_id"],
+                                "finding_id": claim["finding_id"],
+                                "evidence_id": evidence_id,
+                                "redaction_id": redaction["redaction_id"],
+                                "status": "OPEN",
+                                "created_at": utcnow(),
+                                "decided_by": None,
+                                "decision_note": None,
+                                "decided_at": None,
+                            },
+                        )
+                    )
+            if flags:
+                self.store.add_audit(
+                    case_id,
+                    "report_claims_flagged_redaction",
+                    {
+                        "evidence_id": evidence_id,
+                        "redaction_id": redaction["redaction_id"],
+                        "claims": [f["claim_id"] for f in flags],
+                    },
+                )
+        log.info(
+            "case %s evidence %s redacted by %s; %d claim(s) flagged",
+            case_id,
+            evidence_id,
+            analyst,
+            len(flags),
+        )
+        return {"redaction": redaction, "flags": flags}
+
+    def decide_redaction_flag(
+        self,
+        case_id: str,
+        flag_id: str,
+        analyst: str,
+        action: str,
+        note: str = "",
+    ) -> dict:
+        """The analyst's two moves on a redaction-flagged claim —
+        the R3 quarantine pattern, applied to redaction.
+
+        ACKNOWLEDGE: the analyst records that the claim stands
+        with its evidence redacted (the acknowledgement, its
+        author, and its note are on the flag forever) and the
+        approval block lifts for that claim. SEND BACK: the
+        underlying finding leaves the case record and the case
+        returns to APPROVED for re-execution, exactly as a
+        quarantined claim is sent back — a re-investigation has
+        to re-derive the claim from evidence that still exists.
+        There is no third move and no silent path.
+        """
+        case = self._require_case(case_id)
+        if case["status"] not in ("DRAFT_READY", "BUDGET_EXHAUSTED"):
+            raise GateError(
+                f"no report at the gate to decide a redaction flag "
+                f"from (status {case['status']})"
+            )
+        if action not in ("acknowledge", "send_back"):
+            raise ValueError(
+                f"unknown redaction flag action {action!r}; "
+                "expected 'acknowledge' or 'send_back'"
+            )
+        flag = self.store.get_redaction_flag(case_id, flag_id)
+        if flag is None:
+            raise KeyError(flag_id)
+        if flag["status"] != "OPEN":
+            raise GateError(
+                f"redaction flag {flag_id} is already {flag['status']}"
+            )
+        flag["status"] = (
+            "ACKNOWLEDGED" if action == "acknowledge" else "SENT_BACK"
+        )
+        flag["decided_by"] = analyst
+        flag["decision_note"] = note
+        flag["decided_at"] = utcnow()
+        self.store.update_redaction_flag(case_id, flag)
+        if action == "send_back":
+            self.store.delete_finding(case_id, flag["finding_id"])
+        self.store.add_audit(
+            case_id,
+            (
+                "redaction_claim_acknowledged"
+                if action == "acknowledge"
+                else "redaction_claim_sent_back"
+            ),
+            {
+                "flag_id": flag_id,
+                "claim_id": flag["claim_id"],
+                "finding_id": flag["finding_id"],
+                "evidence_id": flag["evidence_id"],
+                "analyst": analyst,
+                "note": note,
+            },
+        )
+        if action == "send_back":
+            self.store.update_case(case_id, status="APPROVED")
+        return flag
+
     # -- budget amendment -----------------------------------------------------
     def amend_budget(
         self, case_id: str, analyst: str, reason: str, budget: BudgetIn
@@ -1629,6 +2004,29 @@ class CaseService:
                 "status": "OK",
                 "checked_at": check["verified_at"],
             }
+            # Redaction gate: a claim in this report that cites
+            # evidence redacted since composition stands flagged,
+            # and the report cannot become final over an open flag.
+            # The analyst's moves are on the flag — acknowledge it
+            # (recorded) or send the claim back — not here.
+            report_claim_ids = {
+                c["claim_id"] for c in report.get("claims", [])
+            }
+            open_flags = [
+                flag
+                for flag in self.store.list_redaction_flags(case_id)
+                if flag["status"] == "OPEN"
+                and flag["claim_id"] in report_claim_ids
+            ]
+            if open_flags:
+                flagged = ", ".join(
+                    sorted({f["claim_id"] for f in open_flags})
+                )
+                raise GateError(
+                    "report cites evidence that has been redacted "
+                    f"({flagged}); each flagged claim must be "
+                    "acknowledged or sent back before approval"
+                )
         if approve and report.get("coverage_detail"):
             # Approving a partial report is the analyst's call — and
             # the approval record carries the coverage table it

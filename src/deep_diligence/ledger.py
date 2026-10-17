@@ -66,9 +66,17 @@ def verify_ledger(store: Store, objects: ObjectStore, case_id: str) -> dict:
     Deterministic: for each citation, the evidence must still exist
     and its current bytes must hash to the value recorded at citation
     time (which must also match the hash recorded at ingestion).
+
+    A redacted item is not drift: its bytes were replaced by a
+    recorded governance act, and the redaction record holds the
+    original hash. Redacted citations are counted and reported
+    apart — the report gate has its own rule for them (an open
+    redaction flag blocks approval); silently folding them into
+    either "OK" or "drift" would misstate both.
     """
     entries = store.list_ledger(case_id)
     drift: list[dict] = []
+    redacted: list[dict] = []
     checked = 0
     for entry in entries:
         for citation in entry["citations"]:
@@ -84,6 +92,16 @@ def verify_ledger(store: Store, objects: ObjectStore, case_id: str) -> dict:
             if ev is None:
                 drift.append({**base, "current_sha256": None, "reason": "evidence_missing"})
                 continue
+            if ev.get("redacted"):
+                redacted.append(
+                    {
+                        **base,
+                        "redaction_id": (ev.get("redaction") or {}).get(
+                            "redaction_id"
+                        ),
+                    }
+                )
+                continue
             try:
                 current = sha256_hex(objects.get(ev["object_key"]))
             except Exception:
@@ -97,5 +115,6 @@ def verify_ledger(store: Store, objects: ObjectStore, case_id: str) -> dict:
         "entries": len(entries),
         "citations_checked": checked,
         "drift": drift,
+        "redacted_citations": redacted,
         "verified_at": utcnow(),
     }
