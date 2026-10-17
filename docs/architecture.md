@@ -356,6 +356,82 @@ the bounded section `harness.notes_section` builds — most recent
 they are context and never evidence — and only when a plan is
 (re-)made, never during execution.
 
+## Source governance
+
+Everything a report asserts traces to evidence, and evidence
+traces to a source. Round 10 makes the source itself a governed
+record and gives the case a retention and redaction lifecycle,
+in `governance.py` with the service methods around it.
+
+**The registry.** A `sources` table holds one record per source:
+name, kind (`filing`, `news`, `internal dataset`, `web`), owner,
+usage basis (`public`, `licensed`, `client-provided`), notes, and
+an append-only history of registration acts. At service startup
+`seed_sources` registers every corpus source with its corpus
+classification — idempotently, never overwriting a record the
+desk has since amended. Registration afterwards is a service/API
+act (`POST /api/sources`), recorded with its analyst, never a
+config edit or a code change.
+
+**Ingestion validates against it.** Both intake paths — corpus
+ingestion (`evidence.ingest_case_evidence`) and the mid-case
+analyst upload (`add_evidence_document`) — call
+`require_registered_source` and refuse a document whose source
+has no registry record, with the source named in the error. A
+brief's `allowed_sources` are checked at case creation
+(`brief_source_problems`): an entry matches if it names a
+registered source, a corpus document slug, or a corpus document
+kind (the three scoping styles briefs already used); anything
+else refuses the brief, fail closed. `case_source_policy` then
+resolves each allowed entry to the governance records it admits,
+so the analyst sees — in the console and at `GET
+/api/cases/{id}/sources` — on what basis the case's sources are
+being used, not just their labels.
+
+**Provenance.** `case_provenance` joins, per evidence item, the
+item's own record (source, SHA-256, ingestion path — corpus
+intake or analyst upload, from the `origin` stamp ingestion now
+writes) with its source's registry record, the findings that
+cite it, and the report claims the citation ledger maps to it.
+It reads only persisted records and the ledger; it is the audit
+answer to "where did this report's facts come from".
+
+**Retention and legal hold.** New cases carry `retention_class`
+(`standard`) and an append-only `retention_history`.
+`retention_sweep` lists standard cases whose creation date plus
+the configured retention period (`RETENTION_DAYS`, default 365)
+has passed — a listing only, by design: nothing in the sweep
+path can delete. Deletion is `delete_case`: an analyst act with
+a required reason that removes the case's evidence and file
+objects, deletes its rows across the case-scoped tables, and
+writes a tombstone — case id, subject, actor, reason, date, the
+final report's SHA-256 if one exists, and the evidence count —
+so the register can always answer that the case existed and who
+closed it. `set_legal_hold` flips the class as a recorded act;
+a case under hold is excluded from the sweep and `delete_case`
+refuses it outright (GateError, HTTP 409). Holds are set and
+cleared, never edited away: both acts stay in
+`retention_history` and the audit trail.
+
+**Redaction.** `redact_evidence` replaces an item's stored
+bytes with a content-free marker (redaction id, analyst, reason,
+date) and writes a `redactions` record holding the item's
+ORIGINAL SHA-256, the reason, and the actor — the original
+content survives nowhere. Three consumers react. The verifier
+treats a redacted cited item as `evidence_missing` ("a redaction
+marker cannot support a claim") and never reads marker bytes as
+evidence text. The citation ledger's gate check reports redacted
+citations separately from drift: redaction is an authorised act,
+not tampering, so it neither passes as verified nor blocks as
+drift. And every claim in the live draft citing the item gets a
+`redaction_flags` record: `decide_report` refuses approval while
+any OPEN flag's claim is in the current report, and the analyst
+either acknowledges the flag (recorded, claim stays) or sends
+it back — the round-3 pattern verbatim: the claim's finding is
+deleted and the case returns to APPROVED for re-execution. Flags
+are recomputed from the live report at each gate, so a stale
+flag on a superseded report never blocks a clean one.
+
 ## The virtual filesystem
 
 `EvidenceBackend` implements the Deep Agents `BackendProtocol` over
@@ -374,10 +450,13 @@ Payload-JSON tables, Postgres and SQLite variants of the same schema
 `cases`, `plans` (versioned), `evidence`, `findings`, `reports`,
 `citation_ledger`, `verifier_reports`, `quarantine`, `conflicts`,
 `case_files`, `audit`, `execution_checkpoints` (one row per case),
-`case_notes`, `report_snapshots`. Case records carry the active harness
+`case_notes`, `report_snapshots`, `sources` (the registry, keyed
+by name), `redactions`, `redaction_flags`, `case_tombstones`.
+Case records carry the active harness
 profile's stamp (id, version, target model) from intake, and their
 continuity state: open `stale_marks` and the append-only
-`staleness_decisions`. The audit
+`staleness_decisions`, plus their `retention_class` and the
+append-only `retention_history` of hold acts. The audit
 trail records case creation, evidence ingestion, plan generation
 and decisions, sub-agent spawns, budget ledger entries (grants —
 each naming the profile the phase ran under — consumption
@@ -386,7 +465,11 @@ and quarantine events, conflict detections and NOTED decisions,
 evidence-drift detections, and report decisions — plus the
 continuity events: mid-case evidence arrival and staleness
 marking, staleness decisions, plan revisions and report snapshots,
-findings reuse, interruption detections, resumes, and case notes.
+findings reuse, interruption detections, resumes, and case notes —
+plus the governance events: source registrations, legal-hold acts,
+evidence redactions with their claim flags and flag decisions, and
+case deletions (the last event a case ever records; the tombstone
+outlives it).
 
 ## Models
 
@@ -569,6 +652,15 @@ the hash check.
   figure, or comparable value sits in the report as two findings and
   is not flagged as a conflict.
 - Web fetch is not wired; the evidence universe is the case corpus.
+- Source governance validates the source as a governed record, not
+  the document's truth: a registered source can still publish a
+  wrong figure — that is the verifier's and the conflict pass's
+  territory, not the registry's. The retention clock runs from
+  case creation, not from the case's last activity; a long-running
+  case's sweep listing is a prompt for an analyst's judgement, not
+  an expiry. Redaction is irreversible by design: the original
+  bytes are destroyed, and the redaction record's hash is the only
+  proof of what was there.
 - The verifier checks what the cited evidence *says* only in the
   deterministic sense: figures, dates, and named entities present in
   the text. It does not judge narrative plausibility or reconcile

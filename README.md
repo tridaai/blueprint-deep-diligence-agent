@@ -284,6 +284,25 @@ is accountable for lives in our code around it:
   and decisions, every sub-agent spawn, budget events, composition,
   and report decisions are recorded per case and visible in the
   console.
+- **Source governance.** Every source is a governed record — name,
+  kind (filing, news, internal dataset, web), owner, usage basis
+  (public, licensed, client-provided) — in a registry seeded from
+  the corpus. Evidence ingestion refuses an unregistered source on
+  both paths (corpus intake and analyst uploads), naming it, and a
+  brief whose `allowed_sources` name nothing real is refused at
+  intake, fail closed. Each case carries a provenance report —
+  every evidence item with its source's governance record, its
+  SHA-256, how it arrived, and the findings and claims that cite
+  it — and a retention class: a sweep lists cases past their
+  retention (`RETENTION_DAYS`) for an analyst's decision and
+  deletes nothing itself; deletion is a recorded act that leaves
+  only a tombstone, and a case under legal hold refuses it in
+  code. An analyst may redact an evidence item for a recorded
+  reason: its bytes are replaced by a marker, the redaction record
+  keeps the original hash (never the content), the verifier treats
+  the item as missing, and every live-report claim citing it is
+  flagged — the report cannot be approved until each flag is
+  acknowledged or its claim sent back.
 
 `docs/architecture.md` has the component map and the details.
 
@@ -345,7 +364,7 @@ the chain's schedule and handoff grade clean at recall **1.000**,
 and the failure variant's missing branch ends empty with its
 question NOT COVERED and the reason named, the case at
 DRAFT_READY. The pytest suite
-(144 tests) covers the gates, the budget caps, the evidence backend,
+(164 tests) covers the gates, the budget caps, the evidence backend,
 the citation rules, the ledger's drift gate, the verifier and
 quarantine, conflict detection and handling, per-phase budgets,
 the budget ledger, the partial-report protocol, amendment, the
@@ -353,10 +372,14 @@ harness profiles, the profile regression gate — including its
 two controls run against the real suite (below) — the
 workstream schedule: dependency validation at the plan gate,
 waves, handoffs, failure isolation, and deterministic
-composition, and long-case continuity: checkpoints,
+composition, long-case continuity: checkpoints,
 interrupted-case detection and resume, evidence arrival with
 staleness marking, the proceed and re-plan decisions, findings
-reuse under its evidence-unchanged rule, and analyst notes.
+reuse under its evidence-unchanged rule, and analyst notes, and
+source governance: the seeded registry and recorded registration,
+ingestion refusal on both paths, the brief source policy,
+provenance, the retention sweep, legal hold, tombstoned
+deletion, and redaction with its approval-blocking claim flags.
 
 The eval runner also runs the packs under any other profile —
 `python evals/run_evals.py --profile openai-gpt` — with the report
@@ -398,7 +421,10 @@ development profile needs none of it: SQLite at `./data/diligence.db`
   extraction quality. A live-mode eval is the way to measure that.
 - The evidence universe is the case corpus. Web fetch is deliberately
   not wired in this round; sources enter a case only through
-  ingestion, with provenance attached.
+  ingestion, with provenance attached — and since the governance
+  round, only against the source registry: a document whose source
+  nobody has registered is refused at the door, corpus or upload
+  alike.
 - Contradictions are planted in the corpus and surface as conflict
   records, but detection is only as wide as the governed metric
   lexicon in `conflicts.py`: a disagreement stated without a
@@ -459,6 +485,9 @@ src/deep_diligence/
                   assert different values, with source classes
   continuity.py   staleness keying: which workstreams a document
                   that arrived mid-case speaks to, scored in code
+  governance.py   source governance: the registry and its corpus
+                  seed, the brief source policy, provenance,
+                  retention and legal hold, redaction
   composer.py     deterministic report assembly from findings
   corpus.py       the bundled evidence corpus (generated for this
                   blueprint) and the gold case packs

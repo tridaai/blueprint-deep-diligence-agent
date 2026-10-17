@@ -247,7 +247,23 @@ def executed_case(service: CaseService) -> str:
     return case_id
 
 
+def _register_trade_coverage(service: CaseService) -> None:
+    # Source governance (R10): an upload may only cite a registered
+    # source, so the desk registers its trade-coverage label before
+    # uploading under it — the governed path, not a bypass.
+    if service.store.get_source("Trade coverage") is None:
+        service.register_source(
+            "Research Desk",
+            name="Trade coverage",
+            kind="news",
+            owner="Trade press publisher",
+            usage_basis="public",
+            notes="Trade-press coverage gathered by the research desk.",
+        )
+
+
 def _add_roaming_doc(service: CaseService, case_id: str) -> dict:
+    _register_trade_coverage(service)
     return service.add_case_evidence(
         case_id,
         "Research Desk",
@@ -500,6 +516,7 @@ def test_a_note_can_never_be_cited(service: CaseService, executed_case: str):
 
 
 def test_continuity_api(service: CaseService, killed_case: str):
+    _register_trade_coverage(service)
     client = TestClient(create_app(service.settings, service))
 
     interrupted = client.get("/api/cases/interrupted")
