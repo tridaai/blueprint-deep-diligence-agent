@@ -20,6 +20,7 @@ from .evidence import evidence_text
 from .ledger import verify_ledger
 from .logging_setup import configure_logging, new_request_id
 from .models import (
+    AssignIn,
     BriefIn,
     BudgetAmendIn,
     CaseOut,
@@ -29,6 +30,7 @@ from .models import (
     EvidenceIn,
     HoldIn,
     NoteIn,
+    PriorityIn,
     ProfileEvaluateIn,
     ProfilePromoteIn,
     ProfileRollbackIn,
@@ -41,6 +43,7 @@ from .models import (
     SectionNoteIn,
     SourceIn,
     StalenessDecisionIn,
+    WorkbenchViewIn,
 )
 from .profiles import ProfileError, list_profile_ids, load_profile
 from .promotion import PromotionError
@@ -368,6 +371,38 @@ def create_app(
         get_case_or_404(case_id)
         return service.store.list_audit(case_id)
 
+    @app.get("/api/cases/{case_id}/timeline")
+    def get_timeline(case_id: str) -> list[dict]:
+        get_case_or_404(case_id)
+        # The case's story in one view: the audit trail merged
+        # with the analyst's notes, gate decisions and state
+        # changes in chronological order — rendered from the
+        # records, nothing re-recorded to feed it.
+        return service.case_timeline(case_id)
+
+    @app.post(
+        "/api/cases/{case_id}/assignment",
+        dependencies=[Depends(require_api_key)],
+    )
+    def assign_case(case_id: str, request: AssignIn) -> dict:
+        get_case_or_404(case_id)
+        case = service.assign_case(case_id, request.analyst, request.assignee)
+        return CaseOut(**case).model_dump()
+
+    @app.post(
+        "/api/cases/{case_id}/priority",
+        dependencies=[Depends(require_api_key)],
+    )
+    def set_priority(case_id: str, request: PriorityIn) -> dict:
+        get_case_or_404(case_id)
+        try:
+            case = service.set_priority(
+                case_id, request.analyst, request.priority
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return CaseOut(**case).model_dump()
+
     @app.get("/api/cases/{case_id}/workstreams")
     def get_workstreams(case_id: str) -> list[dict]:
         get_case_or_404(case_id)
@@ -652,6 +687,58 @@ def create_app(
         except GateError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"tombstone": tombstone}
+
+    # -- analyst workbench -------------------------------------------------
+    # The desk's working view, derived from the case records on
+    # every read. Note what is NOT here: no bulk decision route.
+    # Assignment and priority are triage; every gate decision
+    # stays one case, one analyst, on the case's own endpoints.
+    @app.get("/api/workbench/queue")
+    def workbench_queue(
+        act: str | None = None,
+        assignee: str | None = None,
+        priority: str | None = None,
+    ) -> dict:
+        filters = {"act": act, "assignee": assignee, "priority": priority}
+        try:
+            return service.workbench_queue(filters)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/api/workbench/search")
+    def workbench_search(q: str = "") -> list[dict]:
+        try:
+            return service.search_cases(q)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/api/workbench/views")
+    def list_views(analyst: str | None = None) -> list[dict]:
+        return service.list_views(analyst)
+
+    @app.post(
+        "/api/workbench/views",
+        status_code=201,
+        dependencies=[Depends(require_api_key)],
+    )
+    def save_view(view: WorkbenchViewIn) -> dict:
+        try:
+            return service.save_view(view.analyst, view.name, view.filters)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.delete(
+        "/api/workbench/views/{view_id}",
+        dependencies=[Depends(require_api_key)],
+    )
+    def delete_view(view_id: str, analyst: str) -> dict:
+        try:
+            view = service.delete_view(analyst, view_id)
+        except KeyError:
+            raise HTTPException(
+                status_code=404, detail="saved view not found"
+            ) from None
+        return {"deleted": view["view_id"], "name": view["name"]}
 
     # -- profile regression gate -------------------------------------------
     # The active profile is read from the promotion log; the only

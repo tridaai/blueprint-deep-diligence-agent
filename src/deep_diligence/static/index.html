@@ -73,6 +73,8 @@
     <div class="muted" style="margin-top:8px">Cases run on the offline corpus with the model configured on the server (the offline stub by default).</div>
     <h2>Cases</h2>
     <div id="cases"></div>
+    <h2>Analyst workbench</h2>
+    <div id="workbench"><p class="muted">Loading…</p></div>
     <h2>Interrupted cases</h2>
     <div id="interrupted"><p class="muted">None.</p></div>
     <h2>Harness profile gate</h2>
@@ -121,10 +123,11 @@ async function refreshCases() {
   $("#cases").innerHTML = cases.map(c => `
     <div class="case-card ${current === c.case_id ? "active" : ""}" data-case="${c.case_id}">
       <div class="name">${esc(c.subject)}</div>
-      <div class="meta">${esc(c.case_id)} · <span class="status">${esc(c.status)}</span></div>
+      <div class="meta">${esc(c.case_id)} · <span class="status">${esc(c.status)}</span>${c.priority && c.priority !== "normal" ? ` · <strong>${esc(c.priority)}</strong>` : ""}${c.assignee ? ` · ${esc(c.assignee)}` : ""}</div>
     </div>`).join("") || '<p class="muted">No cases yet.</p>';
   document.querySelectorAll(".case-card").forEach(el => el.addEventListener("click", () => openCase(el.dataset.case)));
   await refreshInterrupted();
+  await refreshWorkbench();
 }
 async function refreshInterrupted() {
   const box = $("#interrupted");
@@ -146,6 +149,118 @@ async function refreshInterrupted() {
     }));
   } catch (e) { box.innerHTML = `<p class="muted">Unavailable: ${esc(e.message)}</p>`; }
 }
+function fmtAge(seconds) {
+  if (seconds === null || seconds === undefined) return "";
+  const s = Math.max(0, Math.round(seconds));
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+  if (d) return `${d}d ${h}h`;
+  if (h) return `${h}h ${m}m`;
+  if (m) return `${m}m`;
+  return `${s}s`;
+}
+let wbFilters = {};
+async function refreshWorkbench() {
+  const box = $("#workbench");
+  if (!box) return;
+  try {
+    const params = new URLSearchParams(Object.entries(wbFilters).filter(([, v]) => v));
+    const [queue, views] = await Promise.all([
+      api(`/api/workbench/queue${params.toString() ? "?" + params : ""}`),
+      api("/api/workbench/views"),
+    ]);
+    box.innerHTML = `
+      <div class="row" style="margin:0 0 6px">
+        <input id="wb-q" type="text" placeholder="Search subjects, questions, findings…" style="flex:1">
+        <button class="secondary" id="wb-search">Search</button>
+      </div>
+      <div id="wb-results"></div>
+      <div class="row" style="margin:0 0 6px">
+        <select id="wb-act" style="flex:1">
+          <option value="">All acts</option>
+          ${queue.groups.map(g => `<option value="${esc(g.act)}" ${wbFilters.act === g.act ? "selected" : ""}>${esc(g.label)}</option>`).join("")}
+        </select>
+        <select id="wb-priority" style="flex:1">
+          <option value="">Any priority</option>
+          ${["normal", "high", "urgent"].map(p => `<option value="${p}" ${wbFilters.priority === p ? "selected" : ""}>${p}</option>`).join("")}
+        </select>
+      </div>
+      <div class="row" style="margin:0 0 6px">
+        <input id="wb-assignee" type="text" placeholder="Assignee (or 'unassigned')" value="${esc(wbFilters.assignee || "")}" style="flex:1">
+        <button class="secondary" id="wb-apply">Filter queue</button>
+      </div>
+      <div class="row" style="margin:0 0 6px">
+        <select id="wb-view" style="flex:1">
+          <option value="">Saved views…</option>
+          ${views.map(v => `<option value="${esc(v.view_id)}" data-analyst="${esc(v.analyst)}">${esc(v.name)} — ${esc(v.analyst)}</option>`).join("")}
+        </select>
+        <button class="secondary" id="wb-view-apply" ${views.length ? "" : "disabled"}>Apply view</button>
+        <button class="secondary" id="wb-view-del" ${views.length ? "" : "disabled"}>Delete</button>
+      </div>
+      <div class="row" style="margin:0 0 10px">
+        <input id="wb-view-name" type="text" placeholder="Name for the current filters" style="flex:1">
+        <button class="secondary" id="wb-view-save">Save view</button>
+      </div>
+      <p class="muted" style="margin:4px 0">${queue.total} item(s) waiting on an analyst. The queue is derived from the case records on every read — deciding stays on each case, one at a time; there is no bulk decision.</p>
+      ${queue.groups.map(g => `
+        <h3 style="margin:10px 0 4px;font-size:13px">${esc(g.label)} (${g.count})${g.count ? ` · oldest waits ${fmtAge(g.oldest_age_seconds)}` : ""}</h3>
+        ${g.items.map(i => `
+          <div class="case-card" data-case="${esc(i.case_id)}">
+            <div class="name">${esc(i.subject)}</div>
+            <div class="meta">${esc(i.detail)}<br>waiting ${fmtAge(i.age_seconds)} · ${esc(i.priority)}${i.assignee ? ` · ${esc(i.assignee)}` : " · unassigned"}</div>
+          </div>`).join("")}
+      `).join("")}
+    `;
+    box.querySelectorAll(".case-card").forEach(el => el.addEventListener("click", () => openCase(el.dataset.case)));
+    $("#wb-apply").addEventListener("click", async () => {
+      wbFilters = {
+        act: $("#wb-act").value || undefined,
+        priority: $("#wb-priority").value || undefined,
+        assignee: $("#wb-assignee").value.trim() || undefined,
+      };
+      await refreshWorkbench();
+    });
+    $("#wb-search").addEventListener("click", async () => {
+      const q = $("#wb-q").value.trim();
+      const target = $("#wb-results");
+      if (!q) { target.innerHTML = ""; return; }
+      try {
+        const hits = await api(`/api/workbench/search?q=${encodeURIComponent(q)}`);
+        target.innerHTML = hits.length ? hits.map(h => `
+          <div class="case-card" data-case="${esc(h.case_id)}">
+            <div class="name">${esc(h.subject)}</div>
+            ${h.matches.map(m => `<div class="meta"><strong>${esc(m.field)}</strong>${m.ref && m.ref !== h.case_id ? ` ${esc(m.ref)}` : ""}: ${esc(m.text)}</div>`).join("")}
+          </div>`).join("") : '<p class="muted">No case mentions that.</p>';
+        target.querySelectorAll(".case-card").forEach(el => el.addEventListener("click", () => openCase(el.dataset.case)));
+      } catch (e) { target.innerHTML = `<p class="muted">${esc(e.message)}</p>`; }
+    });
+    $("#wb-view-apply").addEventListener("click", async () => {
+      const sel = $("#wb-view");
+      const view = views.find(v => v.view_id === sel.value);
+      if (!view) { alert("Pick a saved view first."); return; }
+      wbFilters = {...view.filters};
+      await refreshWorkbench();
+    });
+    $("#wb-view-save").addEventListener("click", async () => {
+      const name = $("#wb-view-name").value.trim();
+      if (!name) { alert("Give the view a name."); return; }
+      try {
+        await api("/api/workbench/views", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({analyst: "Console Analyst", name, filters: wbFilters})});
+      } catch (e) { alert(e.message); }
+      await refreshWorkbench();
+    });
+    $("#wb-view-del").addEventListener("click", async () => {
+      const sel = $("#wb-view");
+      const view = views.find(v => v.view_id === sel.value);
+      if (!view) { alert("Pick a saved view first."); return; }
+      try {
+        await api(`/api/workbench/views/${view.view_id}?analyst=${encodeURIComponent(view.analyst)}`, {method: "DELETE"});
+      } catch (e) { alert(e.message); }
+      await refreshWorkbench();
+    });
+  } catch (e) {
+    box.innerHTML = `<p class="muted">Workbench unavailable: ${esc(e.message)}</p>`;
+  }
+}
 function bar(label, used, cap) {
   const pct = cap ? Math.min(100, Math.round(100 * (used || 0) / cap)) : 0;
   return `<div style="margin:6px 0"><div class="muted">${label}: ${used || 0} / ${cap}</div><div class="bar"><div style="width:${pct}%"></div></div></div>`;
@@ -161,11 +276,12 @@ async function openCase(caseId) {
       ${bar("Steps", phase.consumed.steps, phase.granted.max_steps)}
       ${bar("Tokens", phase.consumed.tokens, phase.granted.max_tokens)}`;
   };
-  const [plan, findings, evidence, audit, report, ledger, verification, quarantine, conflicts, workstreams, checkpoint, notes, versions, provenance, caseSources, redactionData, sectionNotes] = await Promise.all([
+  const [plan, findings, evidence, audit, timeline, report, ledger, verification, quarantine, conflicts, workstreams, checkpoint, notes, versions, provenance, caseSources, redactionData, sectionNotes] = await Promise.all([
     api(`/api/cases/${caseId}/plan`).catch(() => null),
     api(`/api/cases/${caseId}/findings`),
     api(`/api/cases/${caseId}/evidence`),
     api(`/api/cases/${caseId}/audit`),
+    api(`/api/cases/${caseId}/timeline`).catch(() => []),
     api(`/api/cases/${caseId}/report`).catch(() => null),
     api(`/api/cases/${caseId}/ledger`).catch(() => null),
     api(`/api/cases/${caseId}/verification`).catch(() => null),
@@ -205,6 +321,14 @@ async function openCase(caseId) {
       <button id="act-replan" class="secondary" ${canReplan ? "" : "disabled"}>Revise plan (re-plan)</button>
       <button id="act-report-ok" class="secondary" ${canDecideReport ? "" : "disabled"}>Approve report</button>
       <button id="act-report-no" class="danger" ${canDecideReport ? "" : "disabled"}>Reject report</button>
+    </div>
+    <div class="row" style="align-items:center">
+      <span class="muted">Triage — assignment and priority order the desk's queue; they decide nothing:</span>
+      <input id="triage-assignee" type="text" placeholder="Assignee (blank = unassigned)" value="${esc(c.assignee || "")}" style="min-width:180px">
+      <select id="triage-priority" style="width:auto">
+        ${["normal", "high", "urgent"].map(p => `<option value="${p}" ${c.priority === p ? "selected" : ""}>${p}</option>`).join("")}
+      </select>
+      <button id="act-triage" class="secondary">Save triage</button>
     </div>
     <div class="grid">
       <div class="panel"><h3>Brief</h3>
@@ -369,6 +493,12 @@ async function openCase(caseId) {
       <div class="row"><button id="act-note-add" class="secondary">Add note</button></div>
       ${versions.length ? `<h3 style="margin-top:14px">Earlier report versions (${versions.length})</h3>` + versions.map(v => `<div class="finding"><strong>${esc(v.snapshot_id)}</strong> — ${esc(v.reason)} by ${esc(v.analyst)} · draft composed ${esc(v.composed_at)} (${esc(v.report_status)}${v.partial ? ", partial" : ""})</div>`).join("") : ""}
     </div>
+    <div class="panel" style="margin-top:16px"><h3>Timeline (${timeline.length})</h3>
+      <p class="muted" style="margin-top:0">The case's story in one view: gate decisions, state changes, and the analyst's notes, merged from the audit trail and the note records in chronological order.</p>
+      ${timeline.length ? `<table><tr><th>Time</th><th>Event</th><th>Detail</th><th>By</th></tr>
+      ${timeline.map(t => `<tr><td>${esc(t.ts)}</td><td>${esc(t.label)}</td><td>${esc(t.detail || "")}</td><td>${esc(t.actor || "")}</td></tr>`).join("")}
+      </table>` : '<p class="muted">Nothing on the timeline yet.</p>'}
+    </div>
     <div class="panel" style="margin-top:16px"><h3>Audit trail (${audit.length})</h3>
       <table><tr><th>Time</th><th>Event</th><th>Detail</th></tr>
       ${audit.map(a => `<tr><td>${esc(a.ts)}</td><td>${esc(a.event)}</td><td>${esc(JSON.stringify(a.payload))}</td></tr>`).join("")}
@@ -379,6 +509,15 @@ async function openCase(caseId) {
   act("#act-plan-ok", () => api(`/api/cases/${caseId}/plan/decision`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({analyst: "Console Analyst", approve: true, note: ""})}));
   act("#act-plan-no", () => api(`/api/cases/${caseId}/plan/decision`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({analyst: "Console Analyst", approve: false, note: "Sent back from the console"})}));
   act("#act-exec", () => api(`/api/cases/${caseId}/execute`, {method: "POST"}));
+  const triageBtn = $("#act-triage");
+  if (triageBtn) triageBtn.addEventListener("click", async () => {
+    triageBtn.disabled = true;
+    try {
+      await api(`/api/cases/${caseId}/assignment`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({analyst: "Console Analyst", assignee: $("#triage-assignee").value.trim()})});
+      await api(`/api/cases/${caseId}/priority`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({analyst: "Console Analyst", priority: $("#triage-priority").value})});
+    } catch (e) { alert(e.message); }
+    await refreshCases(); await openCase(caseId);
+  });
   act("#act-report-ok", () => api(`/api/cases/${caseId}/report/decision`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({analyst: "Console Analyst", approve: true, note: ""})}));
   act("#act-report-no", () => api(`/api/cases/${caseId}/report/decision`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({analyst: "Console Analyst", approve: false, note: "Sent back from the console"})}));
   const qact = (attr, action) => document.querySelectorAll(`[data-${attr}]`).forEach(el => el.addEventListener("click", async () => {
