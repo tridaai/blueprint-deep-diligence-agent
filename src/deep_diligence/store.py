@@ -933,6 +933,81 @@ class Store:
                 )
             self._conn.commit()
 
+    # -- workbench views ----------------------------------------------------
+    # An analyst's saved queue filters. Their own table because a
+    # view belongs to the desk's workflow, not to a case: it is
+    # keyed by analyst + name, carries no decision, and deleting
+    # one removes nothing but the shortcut itself.
+    def add_view(self, view: dict) -> dict:
+        with self._lock:
+            # Minted from the highest existing suffix, not a row
+            # count: views can be deleted, and a reused ID would
+            # collide on the primary key.
+            rows = self._fetchall("SELECT view_id FROM workbench_views")
+            highest = max(
+                (int(r["view_id"].split("-")[1]) for r in rows),
+                default=0,
+            )
+            view = {**view, "view_id": f"VIEW-{highest + 1:04d}"}
+            self._conn.execute(
+                self._sql(
+                    "INSERT INTO workbench_views"
+                    " (view_id, analyst, name, payload, created_at, updated_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?)"
+                ),
+                (
+                    view["view_id"],
+                    view["analyst"],
+                    view["name"],
+                    json.dumps(view),
+                    view["created_at"],
+                    view["updated_at"],
+                ),
+            )
+            self._conn.commit()
+            return view
+
+    def list_views(self, analyst: str | None = None) -> list[dict]:
+        if analyst is None:
+            rows = self._fetchall(
+                "SELECT payload FROM workbench_views ORDER BY view_id"
+            )
+        else:
+            rows = self._fetchall(
+                "SELECT payload FROM workbench_views"
+                " WHERE analyst = ? ORDER BY view_id",
+                (analyst,),
+            )
+        return [json.loads(r["payload"]) for r in rows]
+
+    def get_view(self, view_id: str) -> dict | None:
+        row = self._fetchone(
+            "SELECT payload FROM workbench_views WHERE view_id = ?",
+            (view_id,),
+        )
+        return json.loads(row["payload"]) if row else None
+
+    def find_view(self, analyst: str, name: str) -> dict | None:
+        row = self._fetchone(
+            "SELECT payload FROM workbench_views"
+            " WHERE analyst = ? AND name = ?",
+            (analyst, name),
+        )
+        return json.loads(row["payload"]) if row else None
+
+    def update_view(self, view: dict) -> dict:
+        self._execute(
+            "UPDATE workbench_views SET payload = ?, updated_at = ?"
+            " WHERE view_id = ?",
+            (json.dumps(view), view["updated_at"], view["view_id"]),
+        )
+        return view
+
+    def delete_view(self, view_id: str) -> None:
+        self._execute(
+            "DELETE FROM workbench_views WHERE view_id = ?", (view_id,)
+        )
+
     # -- audit ------------------------------------------------------------------
     def add_audit(self, case_id: str, event: str, payload: dict | None = None) -> None:
         self._execute(
