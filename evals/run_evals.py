@@ -26,6 +26,14 @@ no other conflicts — facts from different periods (an FY2024 margin
 against its FY2025 successor) are different keys and must never
 conflict.
 
+The budget case runs one gold brief with an execution step cap
+sized to exhaust mid-run: the partial report must itemise coverage
+with at least one NOT COVERED question, no cap may be violated, an
+amendment below consumption must be refused, and a recorded
+amendment plus re-run must reach DRAFT_READY with full recall —
+the budget ledger showing grant, exhaustion, amendment, and
+completion in order.
+
 Exit code 0 only when every gate passes for every case.
 """
 
@@ -39,11 +47,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
+from deep_diligence.budgets import budget_view  # noqa: E402
 from deep_diligence.config import load_settings  # noqa: E402
 from deep_diligence.conflicts import extract_assertions  # noqa: E402
 from deep_diligence.corpus import CORPUS, GOLD_CASES, INTEGRITY_CASES  # noqa: E402
 from deep_diligence.evidence import evidence_text  # noqa: E402
-from deep_diligence.models import BriefIn  # noqa: E402
+from deep_diligence.models import BriefIn, BudgetIn  # noqa: E402
 from deep_diligence.service import CaseService  # noqa: E402
 from deep_diligence.verifier import check_claim  # noqa: E402
 
@@ -250,6 +259,121 @@ def run_case(gold: dict) -> dict:
     }
 
 
+def run_budget_case() -> dict:
+    """The budget-hardening case: the Helvion gold brief with an
+    execution step cap sized to exhaust mid-run (6 of the 28 steps a
+    full run needs). Gates: the case lands in BUDGET_EXHAUSTED with
+    a partial report whose coverage table names at least one
+    NOT COVERED question; no cap is violated (the tripped cap's
+    first crossing is exactly one past the limit, every other
+    counter stays inside its cap); an amendment below consumption
+    is refused; a recorded amendment returns the case to APPROVED
+    and the re-run reaches DRAFT_READY with full recall, the ledger
+    showing grant -> exhaustion -> amendment -> completion in
+    order."""
+    gold = GOLD_CASES[0]
+    scratch = Path(tempfile.mkdtemp(prefix="deep-diligence-eval-budget-"))
+    settings = load_settings(
+        sqlite_path=str(scratch / "diligence.db"),
+        object_dir=str(scratch / "objects"),
+        migrations_dir=str(REPO_ROOT / "migrations"),
+    )
+    service = CaseService(settings)
+    budget = {**gold["brief"]["budget"], "execution": {"max_steps": 6}}
+    case = service.create_case(BriefIn(**{**gold["brief"], "budget": budget}))
+    case_id = case["case_id"]
+    service.run_planning(case_id)
+    service.decide_plan(case_id, analyst="Eval Harness", approve=True)
+    report = service.run_execution(case_id)
+    case = service.store.get_case(case_id)
+    status_after_stop = case["status"]
+    audit = service.store.list_audit(case_id)
+    view = budget_view(case, audit)["view"]
+    usage = case["usage"]["execution"]
+    coverage = report.get("coverage_detail") or []
+    not_covered = [r for r in coverage if r["status"] == "NOT COVERED"]
+    exhaustions = view["exhaustions"]
+    cap_discipline = (
+        bool(exhaustions)
+        and all(
+            e["kind"] == "steps" and e["phase"] == "execution"
+            for e in exhaustions
+        )
+        and min(e["observed"] for e in exhaustions) == 7
+        and usage["subagents"] <= budget["max_subagents"]
+        and usage["tokens"] <= budget["max_tokens"]
+    )
+    # An amendment below what execution already consumed is refused.
+    consumed_steps = view["phases"]["execution"]["consumed"]["steps"]
+    refused = False
+    try:
+        service.amend_budget(
+            case_id,
+            analyst="Eval Harness",
+            reason="Deliberately below consumption",
+            budget=BudgetIn(
+                **{
+                    **gold["brief"]["budget"],
+                    "execution": {"max_steps": consumed_steps - 1},
+                }
+            ),
+        )
+    except ValueError:
+        refused = True
+    amended = service.amend_budget(
+        case_id,
+        analyst="Eval Harness",
+        reason="The step cap under-scoped a three-workstream brief",
+        budget=BudgetIn(
+            **{**gold["brief"]["budget"], "execution": {"max_steps": 120}}
+        ),
+    )
+    service.run_execution(case_id)
+    case = service.store.get_case(case_id)
+    # Ledger order, read after the re-execution: the first grant
+    # precedes the exhaustion, the amendment follows it, and the
+    # completing run's consumption checkpoint closes the sequence.
+    events = [a["event"] for a in service.store.list_audit(case_id)]
+    ledger_order = False
+    if "budget_amended" in events:
+        last_consumed = len(events) - 1 - events[::-1].index("budget_consumed")
+        ledger_order = (
+            events.index("budget_exceeded")
+            < events.index("budget_amended")
+            < last_consumed
+        )
+    found = {
+        f["fact_ref"]
+        for f in service.store.list_findings(case_id)
+        if f.get("fact_ref")
+    }
+    gold_facts = set(gold["gold_facts"])
+    final_usage = case["usage"]["execution"]
+    within_amended = (
+        final_usage["steps"] <= 120
+        and final_usage["subagents"] <= budget["max_subagents"]
+        and final_usage["tokens"] <= budget["max_tokens"]
+    )
+    return {
+        "key": "budget-tight-helvion",
+        "exhausted": report["partial"] is True,
+        "status_after_stop": status_after_stop,
+        "exceeded": (report.get("exceeded_kind"), report.get("exceeded_phase")),
+        "coverage_rows": len(coverage),
+        "not_covered": len(not_covered),
+        "cap_discipline": cap_discipline,
+        "amendment_refused_below_consumption": refused,
+        "amended_status": amended["status"],
+        "ledger_order": ledger_order,
+        "final_status": case["status"],
+        "recall_after_amendment": (
+            len(found & gold_facts) / len(gold_facts) if gold_facts else 1.0
+        ),
+        "missing_after_amendment": sorted(gold_facts - found),
+        "within_amended_caps": within_amended,
+    }
+
+
 def main() -> int:
     results = [run_case(gold) for gold in (*GOLD_CASES, *INTEGRITY_CASES)]
     all_pass = True
@@ -320,6 +444,44 @@ def main() -> int:
         if result["unsupported"]:
             print(f"  unsupported detail: {result['unsupported']}")
         print(f"  execution usage: {result['usage']}")
+    budget_result = run_budget_case()
+    budget_passed = (
+        budget_result["status_after_stop"] == "BUDGET_EXHAUSTED"
+        and budget_result["exhausted"]
+        and budget_result["exceeded"] == ("steps", "execution")
+        and budget_result["coverage_rows"] == 3
+        and budget_result["not_covered"] >= 1
+        and budget_result["cap_discipline"]
+        and budget_result["amendment_refused_below_consumption"]
+        and budget_result["amended_status"] == "APPROVED"
+        and budget_result["ledger_order"]
+        and budget_result["final_status"] == "DRAFT_READY"
+        and budget_result["recall_after_amendment"] >= RECALL_GATE
+        and not budget_result["missing_after_amendment"]
+        and budget_result["within_amended_caps"]
+    )
+    all_pass = all_pass and budget_passed
+    print(
+        f"{budget_result['key']}: exhausted "
+        f"{budget_result['status_after_stop']} on "
+        f"{budget_result['exceeded'][0]} during "
+        f"{budget_result['exceeded'][1]}, coverage rows "
+        f"{budget_result['coverage_rows']} ({budget_result['not_covered']} "
+        f"NOT COVERED), cap discipline "
+        f"{'OK' if budget_result['cap_discipline'] else 'VIOLATED'}, "
+        f"below-consumption amendment "
+        f"{'refused' if budget_result['amendment_refused_below_consumption'] else 'NOT REFUSED'}, "
+        f"amendment -> {budget_result['amended_status']}, ledger order "
+        f"{'OK' if budget_result['ledger_order'] else 'WRONG'}, re-run "
+        f"{budget_result['final_status']} with recall "
+        f"{budget_result['recall_after_amendment']:.3f} "
+        f"-> {'PASS' if budget_passed else 'FAIL'}"
+    )
+    if budget_result["missing_after_amendment"]:
+        print(
+            f"  missing gold facts after amendment: "
+            f"{budget_result['missing_after_amendment']}"
+        )
     print(
         f"unsupported claims in final reports across all packs: "
         f"{total_unsupported} (gate 0)"
