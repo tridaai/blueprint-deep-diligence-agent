@@ -55,6 +55,13 @@ draft and lands in `BUDGET_EXHAUSTED`; the report gate still applies,
 and the analyst has one further move from that state — **amend the
 budget** (a recorded raise, never below what the case has already
 consumed), which returns the case to `APPROVED` for re-execution.
+Two continuity moves sit alongside the lifecycle (detailed under
+"Long-case continuity" below): a case stranded in `EXECUTING` by a
+dead process is **resumed** from its checkpoint rather than
+restarted, and an analyst may request a **plan revision** from any
+planned state, which returns the case to `PLAN_REJECTED` — the
+re-gated path to plan version n+1 — with the superseded draft
+preserved.
 
 ## A run, step by step
 
@@ -254,6 +261,101 @@ case compose byte-identical drafts (a test runs the dependency
 case twice in fresh stores and diffs them, and another records
 findings in scrambled order and checks the composed order).
 
+## Long-case continuity
+
+Everything in this section is record-based: no continuity behaviour
+depends on a process staying alive, because the cases that need it
+are exactly the ones where a process does not.
+
+**Checkpoints.** `_execute` — the single wave loop behind fresh
+executions, resumes, and re-executions — opens a checkpoint when
+execution starts and rewrites it after every wave:
+`execution_checkpoints` holds one row per case with the plan
+version, the attempt number, the wave layout, per-workstream
+entries (status, finding count, finding IDs, wave, reason), a
+budget snapshot folded from the ledger at write time, and
+`complete`/`outcome` once the execution ends by design
+(`draft_ready` / `budget_exhausted`). A process that dies
+mid-execution closes nothing — which is precisely the signal the
+rest of the machinery reads.
+
+**Interrupted cases and resume.** A case in EXECUTING whose
+checkpoint is missing or incomplete is interrupted.
+`interrupted_cases()` scans for them and reports completed vs
+pending questions from the checkpoint; the first scan after an
+interruption writes `execution_interruption_detected` to the audit
+trail, and later scans of the same interruption (recognised as
+those after the latest `execution_started`) read it back without
+writing it again. `resume_execution` is an analyst action and a
+gate — anything but EXECUTING is refused. Workstreams the
+checkpoint records as `completed` or `empty` are carried into the
+execution record without running: their findings stand, under
+their original IDs (finding IDs are minted under the store lock
+from the case's own sequence, and `record_finding` dedups by
+(question, fact_ref), so even a wave that is re-run cannot
+duplicate a fact's finding). Only incomplete waves execute.
+Budget carry-over needs no dedicated machinery: every run's guard
+already seeds its case-level caps from the ledger fold, and the
+interrupted attempt's `budget_consumed` checkpoints are in that
+ledger — a resume cannot re-spend spawns the dead run used. The
+honest edge: a wave that died mid-flight consumed steps after its
+last completed wave, and those never reached the ledger; the
+checkpoint's snapshot is the position at the last completed wave,
+and `execution_resumed` carries that snapshot in its payload so
+the record shows exactly what the resume inherited.
+
+**Evidence arrival and staleness.** `add_case_evidence` ingests an
+analyst-supplied document under intake's rules (object store,
+SHA-256, the case's next evidence ID) with `origin:
+analyst_upload` on the record. On a case past INTAKE,
+`continuity.stale_questions` scores the document against each
+workstream with the governed keyword stems from `corpus.py` — the
+same lists the offline reader routes facts by — and requires a
+score of at least 2: the stem lists overlap by design ("adopt"
+sits in market-scan's list and inside every product document's
+"adoption"; "fund" sits inside "funded"), so a single shared stem
+is cross-talk, not signal, and marking a workstream stale
+interrupts the desk. Marks land on the case record as
+`stale_marks` (evidence ID, question, workstream, score, time);
+`run_execution` refuses while any are open. `decide_staleness`
+records the answer on the case either way: **proceed** clears the
+marks, appends the decision to `staleness_decisions`, and
+re-renders the current draft so the decision appears in its
+Method and limits; **re-plan** routes into `replan_case` with the
+decision attached, and the next draft's limits carry it the same
+way.
+
+**Re-plan and the reuse rule.** `replan_case` snapshots the
+current draft into `report_snapshots` before anything changes
+(plans are already versioned; reports were not), clears open
+staleness into the decision record, and returns the case to
+PLAN_REJECTED, from which `run_planning` mints plan version n+1 —
+with the analyst notes in its context — and the revision faces
+the plan gate like any plan. Reuse is set only when the revision
+answers staleness marks: the case carries `reuse_findings` plus
+the marked questions as `must_rerun`, and at the next execution
+`_reuse_skip` carries a workstream's recorded findings into the
+new execution only when all three hold — the question is
+unmarked, it holds findings, and every evidence item those
+findings cite still hashes to the SHA-256 recorded when the
+evidence arrived. Anything else re-runs. The directive is
+one-shot, cleared by whichever execution it governed. A general
+revision sets no directive and re-executes in full: reuse is a
+staleness answer, not a default, because a scope change the desk
+chose deliberately should not silently inherit findings recorded
+under a different plan.
+
+**Analyst notes.** Notes are the one channel by which what the
+desk learned outside the documents reaches the next plan, and
+they are engineered to be unable to become evidence: their own
+table (`case_notes`, IDs `NOTE-####`), no presence in the case
+filesystem, and citation validation that resolves IDs against the
+evidence table only. They enter the planner's context solely as
+the bounded section `harness.notes_section` builds — most recent
+10, each truncated at 500 characters, under a heading that states
+they are context and never evidence — and only when a plan is
+(re-)made, never during execution.
+
 ## The virtual filesystem
 
 `EvidenceBackend` implements the Deep Agents `BackendProtocol` over
@@ -271,14 +373,20 @@ Payload-JSON tables, Postgres and SQLite variants of the same schema
 (numbered migrations in `migrations/` and `migrations/sqlite/`):
 `cases`, `plans` (versioned), `evidence`, `findings`, `reports`,
 `citation_ledger`, `verifier_reports`, `quarantine`, `conflicts`,
-`case_files`, `audit`. Case records carry the active harness
-profile's stamp (id, version, target model) from intake. The audit
+`case_files`, `audit`, `execution_checkpoints` (one row per case),
+`case_notes`, `report_snapshots`. Case records carry the active harness
+profile's stamp (id, version, target model) from intake, and their
+continuity state: open `stale_marks` and the append-only
+`staleness_decisions`. The audit
 trail records case creation, evidence ingestion, plan generation
 and decisions, sub-agent spawns, budget ledger entries (grants —
 each naming the profile the phase ran under — consumption
 checkpoints, exhaustions, amendments), composition, verification
 and quarantine events, conflict detections and NOTED decisions,
-evidence-drift detections, and report decisions.
+evidence-drift detections, and report decisions — plus the
+continuity events: mid-case evidence arrival and staleness
+marking, staleness decisions, plan revisions and report snapshots,
+findings reuse, interruption detections, resumes, and case notes.
 
 ## Models
 

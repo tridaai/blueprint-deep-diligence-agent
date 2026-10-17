@@ -114,6 +114,53 @@ is accountable for lives in our code around it:
   its coverage table. The composer orders claims by plan, not by
   completion order, so repeated executions of a case produce the
   same draft.
+- **Continuity: checkpoints, interruption, resume.** Cases run for
+  days, so execution keeps its own record. As waves complete, the
+  shell writes a **checkpoint**: per-workstream status, the finding
+  IDs recorded so far, wave position, and a budget snapshot folded
+  from the ledger. A case left in EXECUTING with an incomplete
+  checkpoint — the process died, a deploy restarted it — is an
+  **interrupted case**: `interrupted_cases()` finds them, the
+  first scan records `execution_interruption_detected` in the
+  case's audit trail (later scans do not repeat it), and the desk
+  lists them at `GET /api/cases/interrupted` and in the console.
+  **Resume** is an explicit analyst action, never automatic:
+  workstreams the checkpoint records as finished are not re-run —
+  their findings stand under their original IDs — only the
+  incomplete waves execute, and budget consumption carries over
+  because every run's guard seeds the case-level caps from the
+  ledger, which already holds the interrupted attempt's spend.
+- **Evidence arrives mid-case; staleness is decided, never
+  silent.** An analyst can add a document to a live case (console
+  form or `POST /api/cases/{id}/evidence`): it is ingested under
+  intake's rules — object store, SHA-256, the case's next evidence
+  ID, `origin: analyst_upload` on the record. When the case
+  already has a plan, the shell keys the document against the
+  plan's workstreams in code (the governed keyword stems, with a
+  two-stem minimum, because a single shared stem is cross-talk)
+  and marks the questions it speaks to **stale** on the case
+  record. Execution then refuses until an analyst decides:
+  **proceed** — the decision is recorded on the case and lands in
+  the report's Method and limits — or **re-plan**. A re-plan
+  snapshots the current draft into the report-version store (the
+  plan store already versions plans), returns the case to the
+  plan gate, and the new plan is version n+1. When the re-plan
+  answers staleness, the next execution re-runs exactly the marked
+  workstreams and **reuses** the rest under a stated rule: a
+  workstream's findings carry over only while every item of
+  evidence they cite is still in the case with its recorded hash
+  intact — drifted evidence re-runs its workstream. A general
+  plan revision, with no staleness involved, sets no reuse
+  directive and re-executes in full.
+- **Analyst notes: the desk's memory, never evidence.** Analysts
+  attach timestamped notes to a case (`NOTE-####`, console + API).
+  On any (re-)plan, the notes reach the planner's instruction in
+  a bounded, labelled section — the most recent ten, each
+  truncated at 500 characters — as context for how to investigate.
+  Notes live in their own table: never in the evidence store,
+  never mounted in the case filesystem, and citation validation
+  resolves IDs against the evidence table, so a note ID is refused
+  exactly like any other non-evidence ID.
 - **Citations, enforced at every step.** `record_finding` refuses a
   claim with no valid evidence ID. The report composer re-verifies
   every citation while assembling the draft — a claim whose evidence
@@ -298,15 +345,18 @@ the chain's schedule and handoff grade clean at recall **1.000**,
 and the failure variant's missing branch ends empty with its
 question NOT COVERED and the reason named, the case at
 DRAFT_READY. The pytest suite
-(127 tests) covers the gates, the budget caps, the evidence backend,
+(144 tests) covers the gates, the budget caps, the evidence backend,
 the citation rules, the ledger's drift gate, the verifier and
 quarantine, conflict detection and handling, per-phase budgets,
 the budget ledger, the partial-report protocol, amendment, the
 harness profiles, the profile regression gate — including its
-two controls run against the real suite (below) — and the
+two controls run against the real suite (below) — the
 workstream schedule: dependency validation at the plan gate,
 waves, handoffs, failure isolation, and deterministic
-composition.
+composition, and long-case continuity: checkpoints,
+interrupted-case detection and resume, evidence arrival with
+staleness marking, the proceed and re-plan decisions, findings
+reuse under its evidence-unchanged rule, and analyst notes.
 
 The eval runner also runs the packs under any other profile —
 `python evals/run_evals.py --profile openai-gpt` — with the report
@@ -368,6 +418,11 @@ development profile needs none of it: SQLite at `./data/diligence.db`
   advisory only.
 - Budgets cap each run (planning and execution are guarded
   separately) rather than the case as a whole.
+- A checkpoint's budget snapshot is the position at the last
+  completed wave. A wave that dies mid-flight consumed steps the
+  ledger never saw, and those are not reconstructed: resume
+  carries the recorded position forward, and the resume's audit
+  event carries the snapshot it resumed from.
 - LangSmith is not required anywhere. Tracing is the audit trail plus
   structured JSON logs with request IDs.
 
@@ -392,7 +447,8 @@ src/deep_diligence/
   budgets.py      budget guard enforced in code around the harness
   tools.py        search_corpus / read_document / record_finding
   backend.py      virtual filesystem over the evidence store
-  evidence.py     corpus ingestion with IDs, sources, hashes
+  evidence.py     corpus ingestion with IDs, sources, hashes;
+                  mid-case evidence arrival under the same rules
   ledger.py       the citation ledger: claim→evidence record with
                   citation-time hashes, re-verified at the gate
   verifier.py     the independent verifier: re-checks every claim
@@ -401,6 +457,8 @@ src/deep_diligence/
   conflicts.py    conflict detection: keys supported claims by
                   (entity, metric, period) and records where they
                   assert different values, with source classes
+  continuity.py   staleness keying: which workstreams a document
+                  that arrived mid-case speaks to, scored in code
   composer.py     deterministic report assembly from findings
   corpus.py       the bundled evidence corpus (generated for this
                   blueprint) and the gold case packs
