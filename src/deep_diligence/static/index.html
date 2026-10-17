@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deep Diligence Agent — Trida AI Blueprint</title>
+<style>
+  :root { --ink:#0A0A0A; --indigo:#4F46E5; --line:#E5E5EF; --bg:#FFFFFF; --soft:#F6F6FA; --mut:#5B5B6B; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:"Plus Jakarta Sans", system-ui, -apple-system, "Segoe UI", sans-serif; color:var(--ink); background:var(--bg); }
+  header { display:flex; align-items:center; gap:14px; padding:16px 24px; border-bottom:1px solid var(--line); }
+  header img { width:40px; height:40px; }
+  header h1 { font-size:19px; margin:0; }
+  header .sub { color:var(--mut); font-size:13px; }
+  header .spacer { flex:1; }
+  .pill { font-size:11px; letter-spacing:.08em; text-transform:uppercase; padding:4px 10px; border-radius:999px; border:1px solid var(--line); color:var(--mut); }
+  .pill.ok { color:var(--indigo); border-color:var(--indigo); font-weight:700; }
+  main { display:grid; grid-template-columns:320px 1fr; gap:0; min-height:calc(100vh - 140px); }
+  aside { border-right:1px solid var(--line); padding:18px; background:var(--soft); }
+  aside h2, section h2 { font-size:12px; letter-spacing:.1em; text-transform:uppercase; color:var(--mut); margin:18px 0 8px; }
+  aside h2:first-child { margin-top:0; }
+  select, button { font:inherit; }
+  select { width:100%; padding:8px; border:1px solid var(--line); border-radius:8px; background:#fff; }
+  button { background:var(--indigo); color:#fff; border:0; border-radius:8px; padding:8px 14px; cursor:pointer; font-weight:600; }
+  button.secondary { background:#fff; color:var(--indigo); border:1px solid var(--indigo); }
+  button.danger { background:#fff; color:#B42318; border:1px solid #B42318; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  button.wide { width:100%; margin-top:8px; }
+  .case-card { background:#fff; border:1px solid var(--line); border-radius:10px; padding:10px 12px; margin-bottom:8px; cursor:pointer; }
+  .case-card.active { border-color:var(--indigo); box-shadow:0 0 0 1px var(--indigo); }
+  .case-card .name { font-weight:700; font-size:14px; }
+  .case-card .meta { font-size:12px; color:var(--mut); }
+  .status { font-size:11px; font-weight:700; letter-spacing:.05em; color:var(--indigo); }
+  section { padding:20px 24px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; margin:10px 0; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  .panel { border:1px solid var(--line); border-radius:12px; padding:14px 16px; background:#fff; }
+  .panel h3 { margin:0 0 8px; font-size:14px; }
+  .md { font-size:13.5px; line-height:1.55; }
+  .md h1 { font-size:17px; } .md h2 { font-size:15px; margin:14px 0 6px; color:var(--ink); letter-spacing:0; text-transform:none; }
+  .md ul { margin:6px 0 6px 18px; padding:0; }
+  .md blockquote { border-left:3px solid var(--indigo); margin:8px 0; padding:4px 10px; background:var(--soft); }
+  .finding { padding:8px 0; border-bottom:1px dashed var(--line); font-size:13.5px; }
+  .finding:last-child { border-bottom:0; }
+  a.ev { color:var(--indigo); font-weight:700; text-decoration:none; cursor:pointer; }
+  table { border-collapse:collapse; width:100%; font-size:12.5px; }
+  td, th { border-bottom:1px solid var(--line); padding:5px 6px; text-align:left; vertical-align:top; }
+  .bar { height:8px; background:var(--soft); border-radius:99px; overflow:hidden; }
+  .bar > div { height:100%; background:var(--indigo); }
+  .muted { color:var(--mut); font-size:12.5px; }
+  pre.plain { white-space:pre-wrap; font-size:13px; line-height:1.5; margin:0; }
+  footer { border-top:1px solid var(--line); padding:16px 24px; display:flex; align-items:center; gap:16px; }
+  footer img { width:28px; height:28px; }
+  footer a { color:var(--indigo); font-weight:700; text-decoration:none; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<header>
+  <img src="https://trida.ai/logos-rounded/trida-rounded.png" alt="Trida AI">
+  <div>
+    <h1>Deep Diligence Agent</h1>
+    <div class="sub">LangChain Deep Agents harness, inside Trida's governance shell — plan gate, budgets in code, cited evidence.</div>
+  </div>
+  <div class="spacer"></div>
+  <span class="pill" id="readiness">checking…</span>
+</header>
+<main>
+  <aside>
+    <h2>New case</h2>
+    <select id="sample"></select>
+    <button class="wide" id="create">Create case from sample brief</button>
+    <div class="muted" style="margin-top:8px">Cases run on the offline corpus with the model configured on the server (the offline stub by default).</div>
+    <h2>Cases</h2>
+    <div id="cases"></div>
+  </aside>
+  <section id="detail">
+    <p class="muted">Pick a case, or create one from a sample brief.</p>
+  </section>
+</main>
+<footer>
+  <img src="https://trida.ai/logos-rounded/trida-rounded.png" alt="Trida AI">
+  <span>Trida AI Blueprint — Deep Diligence Agent</span>
+  <div class="spacer" style="flex:1"></div>
+  <a href="https://trida.ai">Visit Trida AI →</a>
+  <a href="https://trida.ai/blog?category=blueprints">View all blueprints →</a>
+</footer>
+<script>
+const $ = (sel) => document.querySelector(sel);
+let samples = [], current = null;
+
+function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function md(text) {
+  const lines = String(text || "").split("\n"); let html = "", inList = false;
+  const inline = (t) => esc(t).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+                             .replace(/\[(EV-\d+)\]/g, '<a class="ev" data-ev="$1">[$1]</a>');
+  for (const line of lines) {
+    if (line.startsWith("## ")) { if (inList) { html += "</ul>"; inList = false; } html += `<h2>${inline(line.slice(3))}</h2>`; }
+    else if (line.startsWith("# ")) { if (inList) { html += "</ul>"; inList = false; } html += `<h1>${inline(line.slice(2))}</h1>`; }
+    else if (line.startsWith("- ") || line.startsWith("• ")) { if (!inList) { html += "<ul>"; inList = true; } html += `<li>${inline(line.slice(2))}</li>`; }
+    else if (line.startsWith("> ")) { if (inList) { html += "</ul>"; inList = false; } html += `<blockquote>${inline(line.slice(2))}</blockquote>`; }
+    else if (line.trim() === "") { if (inList) { html += "</ul>"; inList = false; } }
+    else { if (inList) { html += "</ul>"; inList = false; } html += `<p>${inline(line)}</p>`; }
+  }
+  if (inList) html += "</ul>";
+  return html;
+}
+async function api(path, options) {
+  const res = await fetch(path, options);
+  if (!res.ok) { const body = await res.json().catch(() => ({})); throw new Error(body.detail || res.statusText); }
+  return res.json();
+}
+async function refreshCases() {
+  const cases = await api("/api/cases");
+  $("#cases").innerHTML = cases.map(c => `
+    <div class="case-card ${current === c.case_id ? "active" : ""}" data-case="${c.case_id}">
+      <div class="name">${esc(c.subject)}</div>
+      <div class="meta">${esc(c.case_id)} · <span class="status">${esc(c.status)}</span></div>
+    </div>`).join("") || '<p class="muted">No cases yet.</p>';
+  document.querySelectorAll(".case-card").forEach(el => el.addEventListener("click", () => openCase(el.dataset.case)));
+}
+function bar(label, used, cap) {
+  const pct = cap ? Math.min(100, Math.round(100 * (used || 0) / cap)) : 0;
+  return `<div style="margin:6px 0"><div class="muted">${label}: ${used || 0} / ${cap}</div><div class="bar"><div style="width:${pct}%"></div></div></div>`;
+}
+async function openCase(caseId) {
+  current = caseId;
+  const c = await api(`/api/cases/${caseId}`);
+  const budget = await api(`/api/cases/${caseId}/budget`);
+  const usage = (budget.usage && budget.usage.execution) || {};
+  const planUsage = (budget.usage && budget.usage.planning) || {};
+  const [plan, findings, evidence, audit, report] = await Promise.all([
+    api(`/api/cases/${caseId}/plan`).catch(() => null),
+    api(`/api/cases/${caseId}/findings`),
+    api(`/api/cases/${caseId}/evidence`),
+    api(`/api/cases/${caseId}/audit`),
+    api(`/api/cases/${caseId}/report`).catch(() => null),
+  ]);
+  const canPlan = ["INTAKE", "PLAN_REJECTED"].includes(c.status);
+  const canExecute = ["APPROVED", "REPORT_REJECTED"].includes(c.status);
+  const canDecidePlan = c.status === "PLAN_READY";
+  const canDecideReport = ["DRAFT_READY", "BUDGET_EXHAUSTED"].includes(c.status);
+  const byQuestion = {};
+  findings.forEach(f => { (byQuestion[f.question_id] = byQuestion[f.question_id] || []).push(f); });
+  $("#detail").innerHTML = `
+    <div style="display:flex;align-items:baseline;gap:12px">
+      <h2 style="font-size:20px;color:var(--ink);letter-spacing:0;text-transform:none;margin:0">${esc(c.subject)}</h2>
+      <span class="status">${esc(c.status)}</span>
+      <span class="muted">${esc(c.case_id)} · commissioned by ${esc(c.analyst)}</span>
+    </div>
+    <div class="row">
+      <button id="act-plan" ${canPlan ? "" : "disabled"}>Run planning</button>
+      <button id="act-plan-ok" class="secondary" ${canDecidePlan ? "" : "disabled"}>Approve plan</button>
+      <button id="act-plan-no" class="danger" ${canDecidePlan ? "" : "disabled"}>Reject plan</button>
+      <button id="act-exec" ${canExecute ? "" : "disabled"}>Execute (approved plan)</button>
+      <button id="act-report-ok" class="secondary" ${canDecideReport ? "" : "disabled"}>Approve report</button>
+      <button id="act-report-no" class="danger" ${canDecideReport ? "" : "disabled"}>Reject report</button>
+    </div>
+    <div class="grid">
+      <div class="panel"><h3>Brief</h3>
+        ${c.brief.questions.map(q => `<div class="finding"><strong>${esc(q.id)}</strong> (${esc(q.workstream)}) — ${esc(q.text)}</div>`).join("")}
+        <h3 style="margin-top:14px">Budget vs execution usage</h3>
+        ${bar("Steps", usage.steps, budget.budget.max_steps)}
+        ${bar("Sub-agents", usage.subagents, budget.budget.max_subagents)}
+        ${bar("Tokens", usage.tokens, budget.budget.max_tokens)}
+        <div class="muted">Planning usage: ${planUsage.steps || 0} steps · ${planUsage.tokens || 0} tokens</div>
+      </div>
+      <div class="panel"><h3>Plan ${plan ? `(v${plan.version}, ${esc(plan.status)})` : ""}</h3>
+        ${plan ? `<div class="md">${md(plan.markdown)}</div>` : '<p class="muted">No plan yet.</p>'}
+      </div>
+    </div>
+    <div class="grid" style="margin-top:16px">
+      <div class="panel"><h3>Findings (${findings.length})</h3>
+        ${Object.keys(byQuestion).length ? Object.entries(byQuestion).map(([q, fs]) =>
+          `<div class="muted" style="margin-top:8px">${esc(q)}</div>` + fs.map(f =>
+            `<div class="finding">${esc(f.claim)} ${f.evidence_ids.map(e => `<a class="ev" data-ev="${e}">[${e}]</a>`).join(" ")}</div>`).join("")).join("")
+          : '<p class="muted">No findings yet.</p>'}
+        <h3 style="margin-top:14px">Evidence (${evidence.length})</h3>
+        ${evidence.map(e => `<div class="finding"><a class="ev" data-ev="${e.evidence_id}">[${e.evidence_id}]</a> ${esc(e.title)} <span class="muted">— ${esc(e.source)}, ${esc(e.doc_date)}</span></div>`).join("")}
+        <div id="ev-view"></div>
+      </div>
+      <div class="panel"><h3>Report draft ${report ? `(${esc(report.status)}${report.partial ? ", partial" : ""})` : ""}</h3>
+        ${report ? `<div class="md">${md(report.markdown)}</div>` : '<p class="muted">No report yet.</p>'}
+      </div>
+    </div>
+    <div class="panel" style="margin-top:16px"><h3>Audit trail (${audit.length})</h3>
+      <table><tr><th>Time</th><th>Event</th><th>Detail</th></tr>
+      ${audit.map(a => `<tr><td>${esc(a.ts)}</td><td>${esc(a.event)}</td><td>${esc(JSON.stringify(a.payload))}</td></tr>`).join("")}
+      </table>
+    </div>`;
+  const act = (id, fn) => { const el = $(id); if (el) el.addEventListener("click", async () => { el.disabled = true; try { await fn(); } catch (e) { alert(e.message); } await refreshCases(); await openCase(caseId); }); };
+  act("#act-plan", () => api(`/api/cases/${caseId}/plan`, {method: "POST"}));
+  act("#act-plan-ok", () => api(`/api/cases/${caseId}/plan/decision`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({analyst: "Console Analyst", approve: true, note: ""})}));
+  act("#act-plan-no", () => api(`/api/cases/${caseId}/plan/decision`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({analyst: "Console Analyst", approve: false, note: "Sent back from the console"})}));
+  act("#act-exec", () => api(`/api/cases/${caseId}/execute`, {method: "POST"}));
+  act("#act-report-ok", () => api(`/api/cases/${caseId}/report/decision`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({analyst: "Console Analyst", approve: true, note: ""})}));
+  act("#act-report-no", () => api(`/api/cases/${caseId}/report/decision`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({analyst: "Console Analyst", approve: false, note: "Sent back from the console"})}));
+  document.querySelectorAll("a.ev").forEach(a => a.addEventListener("click", async () => {
+    const ev = await api(`/api/cases/${caseId}/evidence/${a.dataset.ev}`);
+    $("#ev-view").innerHTML = `<h3 style="margin-top:14px">[${esc(ev.evidence_id)}] ${esc(ev.title)}</h3><pre class="plain">${esc(ev.text)}</pre>`;
+  }));
+}
+async function init() {
+  try {
+    const ready = await api("/readiness");
+    $("#readiness").textContent = `store: ${ready.store} · objects: ${ready.objects} · model: ${ready.model}`;
+    $("#readiness").classList.add("ok");
+  } catch { $("#readiness").textContent = "not ready"; }
+  const corpus = await api("/api/corpus");
+  samples = corpus.sample_briefs;
+  $("#sample").innerHTML = samples.map((s, i) => `<option value="${i}">${esc(s.brief.subject)} — ${esc(s.key)}</option>`).join("");
+  $("#create").addEventListener("click", async () => {
+    const brief = samples[Number($("#sample").value)].brief;
+    const created = await api("/api/cases", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(brief)});
+    await refreshCases();
+    await openCase(created.case_id);
+  });
+  await refreshCases();
+}
+init();
+</script>
+</body>
+</html>
