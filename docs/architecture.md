@@ -32,7 +32,8 @@ it, so they hold for any model the harness runs.
 | Tools | `tools.py` | `search_corpus`, `read_document`, `record_finding` (citation rule) |
 | Backend | `backend.py` | Deep Agents filesystem protocol over the evidence store |
 | Evidence | `evidence.py` | Corpus ingestion: IDs, source, hash, retrieval time |
-| Composer | `composer.py` | Deterministic report assembly from findings; re-renders the draft from supported claims after verification |
+| Composer | `composer.py` | Deterministic report assembly from findings; re-renders the draft from supported claims after verification; its finalize step builds the report model and renders every format from it |
+| Report model | `report_model.py` | The report as a structured model: executive summary from supported claims under the integrity check, per-question support grades, risks and open items from records, the print-ready HTML renderer, and the JSON export (model + section annotations) |
 | Ledger | `ledger.py` | Citation ledger: claim→evidence entries with citation-time hashes; re-verification |
 | Verifier | `verifier.py` | Independent claim re-check: reads evidence bytes from the object store and re-derives support; quarantines unsupported claims |
 | Conflicts | `conflicts.py` | Deterministic keying of supported claims by (entity, metric, period); conflict records with both sides, source classes, and recency labels |
@@ -140,6 +141,65 @@ preserved.
    approval is refused until a re-verification comes back clean.
    Approval is what makes a report final; the agent itself never
    issues a recommendation.
+
+## The report model
+
+Composition ends in a finalize step (`composer.apply_conflicts`,
+backed by `report_model.py`): from the supported claims, the
+citation-ledger entries, the conflict records, and the case's
+governance records, it builds a **structured report model** and
+renders every format from that one model — the markdown draft,
+a self-contained print-ready HTML page (inline CSS, house style,
+no external assets), and the JSON export. The model and the HTML
+ride on the report record; the export is the model plus the
+analyst's section annotations. Every later re-render (a conflict
+noted, staleness proceeded on, a quarantined claim dropped, a
+redaction flag acknowledged) passes through the same step, so the
+model and its renderings always describe the records as they now
+stand.
+
+The model's **executive summary** is composed after verification,
+from the supported-claim set alone: one headline claim per
+question in brief order, plus structural counts computed in code
+(claims supported and quarantined, conflicts open and noted,
+questions uncovered and partial). The hard rule is enforced at
+composition time with the verifier's own extraction machinery
+(`verifier.check_claim`): a summary sentence may state no figure,
+date, or named entity that does not appear in a supported claim.
+A failing sentence is dropped and the drop recorded on the report
+record (`executive_summary.dropped`); there is no rewrite path.
+The eval runner re-checks the invariant independently on every
+pack — summary figures, dates, and entities ⊆ the supported
+claims', zero violations tolerated — and grades cross-format
+identity: every claim in the model must appear in both the
+markdown and the HTML.
+
+Each question carries a **support grade**, computed by the single
+function `report_model.question_grade` from the question's
+supported claims, their evidence's source classes, and the
+verifier report's model-check marks: UNANSWERED (no supported
+claims), THIN (a claim the model check marked unsupported, or a
+single claim standing alone), STRONG (two or more claims with at
+least one on a primary source), STANDARD (the rest). The grade
+renders in the section header in every format.
+
+The **Risks and open items** section is generated entirely from
+records: conflict records (open and noted), quarantine records
+with their dispositions, coverage rows that are not ANSWERED,
+staleness-proceed decisions, and redaction flags. Quarantined
+claims are referenced by ID, reason, and disposition only — never
+quoted: a quarantined claim's text reaches no format, the same
+zero-tolerance rule the body lives under. When every set is
+empty, the section states that plainly.
+
+**Section notes** are an analyst's annotations on a report
+section (a question id, or a named section: executive summary,
+conflicts, risks and open items, references, verification,
+method and limits). They are stored in their own table
+(`report_section_notes`, migration 0008), apart from the report
+record: adding or editing one writes no report field, so a note
+can never change the report body or its hash. Their only surface
+is the JSON export's `annotations` field.
 
 ## Budgets
 
@@ -450,7 +510,9 @@ Payload-JSON tables, Postgres and SQLite variants of the same schema
 `cases`, `plans` (versioned), `evidence`, `findings`, `reports`,
 `citation_ledger`, `verifier_reports`, `quarantine`, `conflicts`,
 `case_files`, `audit`, `execution_checkpoints` (one row per case),
-`case_notes`, `report_snapshots`, `sources` (the registry, keyed
+`case_notes`, `report_snapshots`, `report_section_notes` (the
+analyst's report annotations, apart from the report record),
+`sources` (the registry, keyed
 by name), `redactions`, `redaction_flags`, `case_tombstones`.
 Case records carry the active harness
 profile's stamp (id, version, target model) from intake, and their
@@ -469,7 +531,7 @@ findings reuse, interruption detections, resumes, and case notes —
 plus the governance events: source registrations, legal-hold acts,
 evidence redactions with their claim flags and flag decisions, and
 case deletions (the last event a case ever records; the tombstone
-outlives it).
+outlives it) — plus report section notes added and edited.
 
 ## Models
 

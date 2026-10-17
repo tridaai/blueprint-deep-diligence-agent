@@ -232,6 +232,37 @@ is accountable for lives in our code around it:
   Facts from different periods are different keys and never
   conflict; the same value from two sources is corroboration, and
   its claims sit together on one side of the record.
+- **One report model, three formats.** The composed report is a
+  structured model first; the markdown draft, a self-contained
+  print-ready HTML page (inline CSS, no external assets), and a
+  JSON export (`GET /api/cases/{id}/report/html`,
+  `GET /api/cases/{id}/report/export`) all render that one model,
+  so the formats cannot disagree. The model opens with an
+  **executive summary composed after verification, from the
+  supported claims alone**: one headline claim per question in
+  brief order, plus the counts that matter (claims supported,
+  conflicts open, questions uncovered). A hard rule is enforced in
+  code at composition time, using the verifier's own extraction:
+  the summary may state no figure, date, or named entity that does
+  not appear in a supported claim — a sentence that fails is
+  dropped and the drop recorded, never silently rewritten. Each
+  question section carries a **support grade** computed by one
+  documented rule — STRONG (multiple claims, at least one on a
+  primary source), STANDARD (multiple claims on secondary
+  sources), THIN (a single claim, or one the verifier's model
+  check marked weak), UNANSWERED (no supported claims) — rendered
+  in the section header in every format. A **Risks and open
+  items** section is generated entirely from records: open and
+  noted conflicts, quarantined claims with their dispositions
+  (referenced by ID and reason, never quoted — a quarantined
+  claim's text reaches no format), questions the coverage table
+  leaves PARTIAL or NOT COVERED, staleness an analyst proceeded
+  on, and redaction flags; when every set is empty it says so
+  plainly. Analysts can attach **section notes** to any report
+  section (`POST /api/cases/{id}/report/notes`, console
+  affordance included): margin commentary stored apart from the
+  report, carried only in the JSON export's `annotations` field —
+  writing or editing one never changes the report or its hash.
 - **The report gate.** The draft is final only when an analyst
   approves it — and approval first re-verifies the citation ledger
   against the evidence store. If a cited item's bytes no longer hash
@@ -332,6 +363,10 @@ offline model and grades:
   between documents; each must yield exactly one conflict record
   carrying both gold values, and no pack may yield any other
   conflict (period-distinct facts are graded as non-conflicts)
+- **Summary integrity** — every figure, date, and named entity in
+  each pack's executive summary must appear in a supported claim
+  (gate: zero violations), and every claim in the report model
+  must appear in both the markdown and the HTML rendering
 - **Budget hardening** — a fifth case runs a gold brief with an
   execution step cap sized to exhaust mid-run: the case must land
   in BUDGET_EXHAUSTED with a partial report whose coverage table
@@ -364,7 +399,7 @@ the chain's schedule and handoff grade clean at recall **1.000**,
 and the failure variant's missing branch ends empty with its
 question NOT COVERED and the reason named, the case at
 DRAFT_READY. The pytest suite
-(164 tests) covers the gates, the budget caps, the evidence backend,
+(179 tests) covers the gates, the budget caps, the evidence backend,
 the citation rules, the ledger's drift gate, the verifier and
 quarantine, conflict detection and handling, per-phase budgets,
 the budget ledger, the partial-report protocol, amendment, the
@@ -379,7 +414,11 @@ reuse under its evidence-unchanged rule, and analyst notes, and
 source governance: the seeded registry and recorded registration,
 ingestion refusal on both paths, the brief source policy,
 provenance, the retention sweep, legal hold, tombstoned
-deletion, and redaction with its approval-blocking claim flags.
+deletion, and redaction with its approval-blocking claim flags,
+and report depth: the executive summary and its integrity check,
+the support-grade rule, risks and open items from records,
+cross-format identity of claims and figures, and section notes
+that annotate the export without touching the report.
 
 The eval runner also runs the packs under any other profile —
 `python evals/run_evals.py --profile openai-gpt` — with the report
@@ -489,6 +528,10 @@ src/deep_diligence/
                   seed, the brief source policy, provenance,
                   retention and legal hold, redaction
   composer.py     deterministic report assembly from findings
+  report_model.py the report as a structured model: executive
+                  summary under its integrity check, support
+                  grades, risks and open items from records, and
+                  the HTML renderer + JSON export of the one model
   corpus.py       the bundled evidence corpus (generated for this
                   blueprint) and the gold case packs
   store.py        case store port (SQLite local, PostgreSQL production)
