@@ -320,6 +320,64 @@ CORPUS: tuple[CorpusDoc, ...] = (
         ),
     ),
     # ------------------------------------------------------------------
+    # Aster Foundry — industrial castings (citation-integrity case).
+    # The corpus holds a near-duplicate of the annual report: an
+    # earlier preliminary release whose revenue figure is stale. The
+    # current filing says $186M; the preliminary release says $171M.
+    # ------------------------------------------------------------------
+    _doc(
+        slug="aster-annual-report-fy2025", company="aster-foundry",
+        company_name="Aster Foundry", kind="filing",
+        title="Aster Foundry — Annual Report FY2025",
+        source="Company filing (annual report)", date="2026-02-10",
+        body=(
+            "Aster Foundry, an Ohio-based maker of industrial castings "
+            "and induction furnaces, closed FY2025 with double-digit "
+            "growth as automotive programmes ramped. Management pointed "
+            "to the audited annual figures as the record of the year; "
+            "the preliminary release issued in January was superseded "
+            "by this report after audit adjustments."
+        ),
+        facts=(
+            ("F-AST-101", "Revenue grew 11% year over year to $186M in FY2025.", "q1"),
+            ("F-AST-102", "Gross margin was 24% in FY2025, up from 21% in FY2024.", "q1"),
+            ("F-AST-103", "Net debt stood at $22M at the end of FY2025.", "q1"),
+        ),
+    ),
+    _doc(
+        slug="aster-preliminary-results-fy2025", company="aster-foundry",
+        company_name="Aster Foundry", kind="news",
+        title="Aster Foundry — Preliminary FY2025 Results",
+        source="Company preliminary release (unaudited)", date="2026-01-15",
+        body=(
+            "Aster Foundry issued unaudited preliminary results for "
+            "FY2025 ahead of its annual report. The release carried the "
+            "same narrative as the later filing — double-digit growth "
+            "on automotive programme ramps — but its revenue figure was "
+            "preliminary and was revised when the audited report "
+            "appeared the following month."
+        ),
+        facts=(
+            ("F-AST-901", "Preliminary results put Aster's FY2025 revenue at $171M, before audit adjustments.", "q1"),
+        ),
+    ),
+    _doc(
+        slug="aster-product-overview", company="aster-foundry",
+        company_name="Aster Foundry", kind="product",
+        title="Aster Foundry — Product and Operations Overview",
+        source="Vendor product documentation", date="2025-11-20",
+        body=(
+            "The overview covers Aster's induction furnace line, the "
+            "casting plants it runs in the Midwest, and the quality "
+            "certifications its automotive customers require."
+        ),
+        facts=(
+            ("F-AST-201", "The AF-40 is Aster's flagship induction furnace product platform for foundry customers.", "q2"),
+            ("F-AST-202", "Aster operates 3 casting facilities in Ohio and Pennsylvania.", "q2"),
+            ("F-AST-203", "The AF-40 carries ISO 9001 certification for automotive supply chains.", "q2"),
+        ),
+    ),
+    # ------------------------------------------------------------------
     # Distractor: a similarly named but different company. Never in
     # scope for a gold case; its facts are nobody's gold.
     # ------------------------------------------------------------------
@@ -413,5 +471,43 @@ GOLD_CASES: tuple[dict, ...] = (
         },
         "gold_facts": _gold_facts("selene-diagnostics"),
         "contradictions": [["F-SEL-101", "F-SEL-104"]],
+    },
+)
+
+
+# Citation-integrity scenarios: gold packs whose grading goes beyond
+# recall and citation presence to citation *correctness*. Aster's
+# corpus contains a near-duplicate preliminary release with a stale
+# revenue figure ($171M against the current filing's $186M). The stale
+# fact (F-AST-901) is deliberately NOT gold: the pack passes only if
+# the current figure's finding cites the current document, and — as in
+# every pack — every figure a claim states appears in the evidence it
+# cites (checked in evals/run_evals.py).
+INTEGRITY_CASES: tuple[dict, ...] = (
+    {
+        "key": "integrity-aster-citation",
+        "brief": {
+            "subject": "Aster Foundry",
+            "subject_ref": "aster-foundry",
+            "analyst": "Eval Harness",
+            "questions": [
+                {"id": "q1", "text": "What is Aster's financial health: revenue, margins, and debt?", "workstream": "financial-scan"},
+                {"id": "q2", "text": "What does Aster make and where does it operate: products, facilities, and certification?", "workstream": "product-scan"},
+            ],
+            "allowed_sources": [],
+            "budget": {"max_steps": 120, "max_subagents": 6, "max_tokens": 400000, "max_wall_seconds": 600},
+        },
+        "gold_facts": {
+            "F-AST-101": "q1",
+            "F-AST-102": "q1",
+            "F-AST-103": "q1",
+            "F-AST-201": "q2",
+            "F-AST-202": "q2",
+            "F-AST-203": "q2",
+        },
+        "contradictions": [["F-AST-101", "F-AST-901"]],
+        "citation_checks": [
+            {"fact_ref": "F-AST-101", "doc_slug": "aster-annual-report-fy2025"},
+        ],
     },
 )
