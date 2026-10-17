@@ -37,6 +37,7 @@ it, so they hold for any model the harness runs.
 | Ledger | `ledger.py` | Citation ledger: claim→evidence entries with citation-time hashes; re-verification |
 | Verifier | `verifier.py` | Independent claim re-check: reads evidence bytes from the object store and re-derives support; quarantines unsupported claims |
 | Conflicts | `conflicts.py` | Deterministic keying of supported claims by (entity, metric, period); conflict records with both sides, source classes, and recency labels |
+| Workbench | `workbench.py` | The analyst queue derived from case records (grouped by act needed, oldest first), the merged case timeline, and deterministic case search; saved views in the store |
 | Store | `store.py` | Case store port: SQLite (local) / PostgreSQL (production) |
 | Objects | `objects.py` | Object-store port: local dir / S3-compatible |
 | Corpus | `corpus.py` | Generated evidence corpus + gold case packs |
@@ -492,6 +493,72 @@ deleted and the case returns to APPROVED for re-execution. Flags
 are recomputed from the live report at each gate, so a stale
 flag on a superseded report never blocks a clean one.
 
+## Analyst workbench
+
+The workbench (`workbench.py`, reached through the service and
+the API) composes the surfaces above into the desk's working
+view. It stores exactly one new thing — saved views — and
+derives everything else from records that already exist.
+
+**The queue.** Each case is read for the acts it owes, in seven
+groups: plan awaiting decision (status PLAN_READY; waiting since
+the plan was generated), draft awaiting decision (DRAFT_READY;
+since the draft was composed), quarantined claims awaiting
+disposition (records still QUARANTINED), conflicts not yet
+noted (records still OPEN), redaction flags open (flags still
+OPEN whose claim is in the live report — the same set that
+blocks report approval), interrupted cases awaiting resume (the
+interrupted scan's result; building the queue runs the scan,
+because listing is its detection point), and budget-exhausted
+cases awaiting amendment (BUDGET_EXHAUSTED; since the cap
+tripped — that group also represents the partial draft's
+decision, so the case is not listed twice). The record-level
+groups count only while the case sits at a gate where the
+decision can actually be taken (DRAFT_READY or
+BUDGET_EXHAUSTED), mirroring the decision endpoints' own gates.
+Items sort oldest-waiting first; each group reports its count
+and its oldest wait; ages are computed against the store clock
+(`utcnow`) at read time. Filters — act, assignee, priority —
+narrow every group the same way. Nothing about the queue is
+persisted: it is what the records say, recomputed per read, so
+it cannot drift from the cases it describes.
+
+**The timeline.** A case's audit trail already carries every
+gate decision and state change; the timeline renders it as one
+chronological view, folding the analyst's notes in at their own
+events and enriching those entries with the note text (case
+notes and report section notes alike, looked up by the note id
+the audit payload carries), with a human-readable label and the
+acting analyst per entry. It records nothing of its own.
+
+**Triage.** A case record carries an `assignee` (or none) and a
+`priority` (`normal`, `high`, `urgent`). Setting either is a
+recorded act — the audit event names the actor, the new value,
+and what it replaced — and either can be read off the case, the
+queue items, and the search results. Triage confers no decision
+rights and changes no gate: it exists to order the desk's work.
+There is deliberately no bulk decision in the workbench or its
+API — a gate decision is one case, one analyst, made on the
+case's own endpoints — and a test asserts that against the
+route table itself.
+
+**Saved views.** `workbench_views` (migration 0009) holds one
+analyst's named queue filters: the filter keys are the queue's
+own (act, assignee, priority) and are validated on save, so a
+view can never name a filter the queue does not implement.
+Saving under a name the analyst already holds replaces that
+view's filters; a view can be deleted by its owner. A view holds
+no case state and no decision — it is a shortcut, and deleting
+one touches nothing else.
+
+**Search.** Deterministic, case-insensitive substring search
+over case subjects, brief question texts, and finding claims.
+Each hit names the field it came from and the question or
+finding id, so the analyst lands on the matched text, not just
+the case. No index is maintained: the desk's case volume makes
+a scan the honest implementation, and the result order follows
+the case list.
+
 ## The virtual filesystem
 
 `EvidenceBackend` implements the Deep Agents `BackendProtocol` over
@@ -513,12 +580,16 @@ Payload-JSON tables, Postgres and SQLite variants of the same schema
 `case_notes`, `report_snapshots`, `report_section_notes` (the
 analyst's report annotations, apart from the report record),
 `sources` (the registry, keyed
-by name), `redactions`, `redaction_flags`, `case_tombstones`.
-Case records carry the active harness
+by name), `redactions`, `redaction_flags`, `case_tombstones`,
+`workbench_views` (an analyst's saved queue filters, keyed by
+analyst and name — the one workbench table, holding no case
+state). Case records carry the active harness
 profile's stamp (id, version, target model) from intake, and their
 continuity state: open `stale_marks` and the append-only
 `staleness_decisions`, plus their `retention_class` and the
-append-only `retention_history` of hold acts. The audit
+append-only `retention_history` of hold acts, plus their
+workbench triage state: an `assignee` and a `priority`, each set
+as a recorded act. The audit
 trail records case creation, evidence ingestion, plan generation
 and decisions, sub-agent spawns, budget ledger entries (grants —
 each naming the profile the phase ran under — consumption
@@ -531,7 +602,9 @@ findings reuse, interruption detections, resumes, and case notes —
 plus the governance events: source registrations, legal-hold acts,
 evidence redactions with their claim flags and flag decisions, and
 case deletions (the last event a case ever records; the tombstone
-outlives it) — plus report section notes added and edited.
+outlives it) — plus report section notes added and edited — plus
+the workbench triage acts: case assignments and priority changes,
+each naming the actor and the value it replaced.
 
 ## Models
 

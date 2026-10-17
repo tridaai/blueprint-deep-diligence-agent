@@ -334,6 +334,25 @@ is accountable for lives in our code around it:
   the item as missing, and every live-report claim citing it is
   flagged — the report cannot be approved until each flag is
   acknowledged or its claim sent back.
+- **The analyst workbench.** Everything a case owes a person, in
+  one derived view (`GET /api/workbench/queue`, and a console
+  panel): plans awaiting decision, drafts awaiting decision,
+  quarantined claims awaiting disposition, conflicts not yet
+  noted, open redaction flags, interrupted cases awaiting
+  resume, and budget-exhausted cases awaiting amendment —
+  grouped by the act needed, oldest waiting first, each item
+  naming how long it has waited. The queue is computed from the
+  case records on every read and stores nothing, so it cannot
+  drift from the cases it describes. A per-case **timeline**
+  merges the audit trail with the analyst's notes into one
+  chronological view, and **search** runs deterministically over
+  subjects, brief questions, and finding claims, naming the field
+  each hit came from. Cases carry **triage** — an assignee and a
+  priority (normal / high / urgent), each set as a recorded act —
+  and analysts can save queue filters as named **views**. Triage
+  orders the desk's work and gates nothing: there is no bulk
+  decision anywhere, and every gate decision remains one case,
+  one analyst, made on the case itself.
 
 `docs/architecture.md` has the component map and the details.
 
@@ -399,7 +418,7 @@ the chain's schedule and handoff grade clean at recall **1.000**,
 and the failure variant's missing branch ends empty with its
 question NOT COVERED and the reason named, the case at
 DRAFT_READY. The pytest suite
-(179 tests) covers the gates, the budget caps, the evidence backend,
+(190 tests) covers the gates, the budget caps, the evidence backend,
 the citation rules, the ledger's drift gate, the verifier and
 quarantine, conflict detection and handling, per-phase budgets,
 the budget ledger, the partial-report protocol, amendment, the
@@ -418,7 +437,11 @@ deletion, and redaction with its approval-blocking claim flags,
 and report depth: the executive summary and its integrity check,
 the support-grade rule, risks and open items from records,
 cross-format identity of claims and figures, and section notes
-that annotate the export without touching the report.
+that annotate the export without touching the report, and the
+analyst workbench: the queue derived per group from planted
+states with exact waits, recorded triage, the merged timeline,
+saved views, field-named search, and the route table's proof
+that no bulk decision exists.
 
 The eval runner also runs the packs under any other profile —
 `python evals/run_evals.py --profile openai-gpt` — with the report
@@ -527,6 +550,9 @@ src/deep_diligence/
   governance.py   source governance: the registry and its corpus
                   seed, the brief source policy, provenance,
                   retention and legal hold, redaction
+  workbench.py    the analyst workbench: the queue derived from
+                  case records, the merged case timeline, saved
+                  views, and deterministic case search
   composer.py     deterministic report assembly from findings
   report_model.py the report as a structured model: executive
                   summary under its integrity check, support
