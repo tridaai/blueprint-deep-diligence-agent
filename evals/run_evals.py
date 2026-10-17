@@ -35,10 +35,22 @@ the budget ledger showing grant, exhaustion, amendment, and
 completion in order.
 
 Exit code 0 only when every gate passes for every case.
+
+Profiles: `--profile <id>` runs the same packs under a different
+harness profile (profiles/<id>.json), with the offline stub model
+standing in for the profile's target model — the profile is
+configuration, the model is injected. The report header names the
+profile and its version, so every result is attributable to the
+profile that produced it. The default profile (offline-stub) is the
+gate: its run decides the exit code. A run under any other profile
+is reported for attribution and exits 0 when the run completes —
+whether that profile may be promoted is a separate decision the
+gate does not make here (an unloadable profile exits 2).
 """
 
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 import tempfile
@@ -53,8 +65,11 @@ from deep_diligence.conflicts import extract_assertions  # noqa: E402
 from deep_diligence.corpus import CORPUS, GOLD_CASES, INTEGRITY_CASES  # noqa: E402
 from deep_diligence.evidence import evidence_text  # noqa: E402
 from deep_diligence.models import BriefIn, BudgetIn  # noqa: E402
+from deep_diligence.profiles import ProfileError, load_profile  # noqa: E402
 from deep_diligence.service import CaseService  # noqa: E402
 from deep_diligence.verifier import check_claim  # noqa: E402
+
+DEFAULT_PROFILE = "offline-stub"
 
 RECALL_GATE = 0.90
 FIGURE = re.compile(r"\$[\d,.]+(?:\.\d+)?[MBK]?|\d+(?:\.\d+)?%")
@@ -85,12 +100,13 @@ def expected_conflict(fact_a: str, fact_b: str) -> dict | None:
     return None
 
 
-def run_case(gold: dict) -> dict:
+def run_case(gold: dict, profile_id: str = DEFAULT_PROFILE) -> dict:
     scratch = Path(tempfile.mkdtemp(prefix="deep-diligence-eval-"))
     settings = load_settings(
         sqlite_path=str(scratch / "diligence.db"),
         object_dir=str(scratch / "objects"),
         migrations_dir=str(REPO_ROOT / "migrations"),
+        profile_id=profile_id,
     )
     service = CaseService(settings)
     case = service.create_case(BriefIn(**gold["brief"]))
@@ -238,6 +254,7 @@ def run_case(gold: dict) -> dict:
     )
     return {
         "key": gold["key"],
+        "profile": service.profile.record(),
         "recall": recall,
         "missing": sorted(gold_facts - found),
         "citation": citation,
@@ -259,7 +276,7 @@ def run_case(gold: dict) -> dict:
     }
 
 
-def run_budget_case() -> dict:
+def run_budget_case(profile_id: str = DEFAULT_PROFILE) -> dict:
     """The budget-hardening case: the Helvion gold brief with an
     execution step cap sized to exhaust mid-run (6 of the 28 steps a
     full run needs). Gates: the case lands in BUDGET_EXHAUSTED with
@@ -277,6 +294,7 @@ def run_budget_case() -> dict:
         sqlite_path=str(scratch / "diligence.db"),
         object_dir=str(scratch / "objects"),
         migrations_dir=str(REPO_ROOT / "migrations"),
+        profile_id=profile_id,
     )
     service = CaseService(settings)
     budget = {**gold["brief"]["budget"], "execution": {"max_steps": 6}}
@@ -356,6 +374,7 @@ def run_budget_case() -> dict:
     )
     return {
         "key": "budget-tight-helvion",
+        "profile": service.profile.record(),
         "exhausted": report["partial"] is True,
         "status_after_stop": status_after_stop,
         "exceeded": (report.get("exceeded_kind"), report.get("exceeded_phase")),
@@ -374,8 +393,35 @@ def run_budget_case() -> dict:
     }
 
 
-def main() -> int:
-    results = [run_case(gold) for gold in (*GOLD_CASES, *INTEGRITY_CASES)]
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Gold case-pack gate for the Deep Diligence Agent."
+    )
+    parser.add_argument(
+        "--profile",
+        default=DEFAULT_PROFILE,
+        help=(
+            "harness profile to run the packs under "
+            f"(default {DEFAULT_PROFILE}, the gate). A run under any "
+            "other profile is reported for attribution, not gated."
+        ),
+    )
+    args = parser.parse_args(argv)
+    try:
+        profile = load_profile(args.profile)
+    except ProfileError as exc:
+        print(f"cannot run evals: {exc}", file=sys.stderr)
+        return 2
+    gated = args.profile == DEFAULT_PROFILE
+    print(
+        f"harness profile: {profile.id} v{profile.version} "
+        f"(target {profile.target_model})"
+        + ("" if gated else " — profile run, reported not gated")
+    )
+    results = [
+        run_case(gold, profile_id=args.profile)
+        for gold in (*GOLD_CASES, *INTEGRITY_CASES)
+    ]
     all_pass = True
     total_unsupported = 0
     for result in results:
@@ -444,7 +490,7 @@ def main() -> int:
         if result["unsupported"]:
             print(f"  unsupported detail: {result['unsupported']}")
         print(f"  execution usage: {result['usage']}")
-    budget_result = run_budget_case()
+    budget_result = run_budget_case(profile_id=args.profile)
     budget_passed = (
         budget_result["status_after_stop"] == "BUDGET_EXHAUSTED"
         and budget_result["exhausted"]
@@ -487,6 +533,13 @@ def main() -> int:
         f"{total_unsupported} (gate 0)"
     )
     print("EVALS:", "PASS" if all_pass else "FAIL")
+    if not gated:
+        print(
+            f"profile run under {profile.id} v{profile.version}: grades "
+            "above are reported for attribution; the gate is the "
+            f"{DEFAULT_PROFILE} run."
+        )
+        return 0
     return 0 if all_pass else 1
 
 
