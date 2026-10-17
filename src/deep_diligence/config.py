@@ -1,0 +1,72 @@
+"""Runtime configuration, from the environment.
+
+Profiles:
+  * Local (default): SQLite case store + local object directory. No keys.
+  * Production: DATABASE_URL points at PostgreSQL and S3_* at an
+    S3-compatible object store (SeaweedFS in the compose topology).
+  * Model: a real provider when one is configured (LLM_BACKEND /
+    provider keys), otherwise the labelled offline stub model.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+
+
+@dataclass(frozen=True)
+class Settings:
+    database_url: str | None = None
+    sqlite_path: str = "./data/diligence.db"
+    migrations_dir: str = "migrations"
+    # Object storage: S3 when s3_endpoint_url is set, local dir otherwise.
+    s3_endpoint_url: str | None = None
+    s3_bucket: str = "diligence-evidence"
+    s3_access_key_id: str | None = None
+    s3_secret_access_key: str | None = None
+    s3_region: str = "us-east-1"
+    object_dir: str = "./data/objects"
+    # Model provider boundary.
+    llm_backend: str = "offline"  # offline | openai | anthropic | ollama
+    openai_api_key: str | None = None
+    openai_base_url: str | None = None
+    openai_model: str = "gpt-5.1"
+    anthropic_api_key: str | None = None
+    anthropic_model: str = "claude-sonnet-4-5-20250929"
+    ollama_base_url: str = "http://localhost:11434/v1"
+    ollama_model: str = "llama3.1"
+    api_key: str | None = None
+
+    @property
+    def store_backend(self) -> str:
+        return "postgres" if self.database_url else "sqlite"
+
+    @property
+    def object_backend(self) -> str:
+        return "s3" if self.s3_endpoint_url else "local"
+
+
+def load_settings(**overrides) -> Settings:
+    env = os.environ
+    values = dict(
+        database_url=env.get("DATABASE_URL") or None,
+        sqlite_path=env.get("SQLITE_PATH", "./data/diligence.db"),
+        migrations_dir=env.get("MIGRATIONS_DIR", "migrations"),
+        s3_endpoint_url=env.get("S3_ENDPOINT_URL") or None,
+        s3_bucket=env.get("S3_BUCKET", "diligence-evidence"),
+        s3_access_key_id=env.get("S3_ACCESS_KEY_ID") or None,
+        s3_secret_access_key=env.get("S3_SECRET_ACCESS_KEY") or None,
+        s3_region=env.get("S3_REGION", "us-east-1"),
+        object_dir=env.get("OBJECT_DIR", "./data/objects"),
+        llm_backend=(env.get("LLM_BACKEND") or "").lower() or "offline",
+        openai_api_key=env.get("OPENAI_API_KEY") or None,
+        openai_base_url=env.get("OPENAI_BASE_URL") or None,
+        openai_model=env.get("OPENAI_MODEL", "gpt-5.1"),
+        anthropic_api_key=env.get("ANTHROPIC_API_KEY") or None,
+        anthropic_model=env.get("ANTHROPIC_MODEL", "claude-sonnet-4-5-20250929"),
+        ollama_base_url=env.get("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
+        ollama_model=env.get("OLLAMA_MODEL", "llama3.1"),
+        api_key=env.get("API_KEY") or None,
+    )
+    values.update({k: v for k, v in overrides.items() if v is not None})
+    return Settings(**values)

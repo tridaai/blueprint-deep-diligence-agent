@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trida-blueprint-deep-diligence-agent"
+version = "0.1.0"
+description = "Trida AI Blueprint — Deep Diligence Agent on LangChain Deep Agents (reference prototype)"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.11,<3.13"
+# Direct dependencies are pinned EXACTLY (==). The full transitive set is
+# frozen in constraints.txt; the pip fallback installs that set first and
+# the package itself second (see Makefile, target install-pip).
+dependencies = [
+    "deepagents==0.7.28",
+    "langchain==1.4.6",
+    "langchain-core==1.6.12",
+    "langgraph==1.2.16",
+    "fastapi==0.143.0",
+    "pydantic==2.14.0",
+    "uvicorn==0.54.0",
+    "psycopg[binary]==3.2.9",
+    "boto3==1.43.62",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==9.1.1", "httpx==0.28.1"]
+llm = ["langchain-openai==1.4.3", "langchain-anthropic==1.7.6"]
+
+[project.scripts]
+deep-diligence = "deep_diligence.cli:main"
+deep-diligence-demo = "deep_diligence.demo:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+deep_diligence = ["static/*.html"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
