@@ -2,8 +2,18 @@
 
 `create_deep_agent` provides the planning tools, the sub-agent
 delegation (the `task` tool), the virtual filesystem, and the context
-middleware. The prompts below are written for a real model; the offline
-stub model keys its playbook off the same phase and workstream markers.
+middleware. The build is consumed from the active harness profile
+(profiles.py): the planner prompt and each sub-agent's prompt are
+assembled from the profile's named sections, each sub-agent gets the
+tools its profile entry allows, the roster is the profile's roster,
+and the profile's middleware switches shape the caller middleware.
+
+The prompt texts below are retained as the canonical source the
+shipped offline profile (profiles/offline-stub.json) mirrors section
+for section — a test pins the two together, so the default build is
+byte-for-byte the build this blueprint shipped with before profiles.
+The prompts are written for a real model; the offline stub model keys
+its playbook off the same phase and workstream markers.
 """
 
 from __future__ import annotations
@@ -12,7 +22,7 @@ import json
 
 from deepagents import create_deep_agent
 
-from .models import WORKSTREAMS
+from .profiles import build_middleware
 
 PLANNER_SYSTEM = """ROLE: PLANNER — you run diligence investigations for an analyst desk.
 
@@ -65,22 +75,29 @@ recorded, reply with a one-line summary.
 """
 
 
-def build_agent(*, model, backend, case_tools):
+def build_agent(*, model, backend, case_tools, profile):
+    """Assemble the harness under a profile. The model is injected
+    (llm.py); the profile is configuration — prompts, per-role tool
+    allowlists, the sub-agent roster, and middleware switches all
+    come from the profile artifact, so switching the configured
+    profile changes the build with no code change."""
+    tools_by_name = {tool.name: tool for tool in case_tools}
     subagents = [
         {
-            "name": name,
-            "description": WORKSTREAM_DESCRIPTIONS[name],
-            "system_prompt": workstream_system(name),
-            "tools": case_tools,
+            "name": entry.name,
+            "description": entry.description,
+            "system_prompt": profile.subagent_prompt(entry.name),
+            "tools": [tools_by_name[name] for name in entry.tools],
         }
-        for name in WORKSTREAMS
+        for entry in profile.subagents
     ]
     return create_deep_agent(
         model=model,
         tools=[],
-        system_prompt=PLANNER_SYSTEM,
+        system_prompt=profile.planner_prompt(),
         subagents=subagents,
         backend=backend,
+        middleware=build_middleware(profile, backend),
         name="deep-diligence-planner",
     )
 

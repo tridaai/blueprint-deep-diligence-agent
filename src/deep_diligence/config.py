@@ -6,6 +6,10 @@ Profiles:
     S3-compatible object store (SeaweedFS in the compose topology).
   * Model: a real provider when one is configured (LLM_BACKEND /
     provider keys), otherwise the labelled offline stub model.
+  * Harness profile: PROFILE_ID selects the profile artifact from
+    profiles/ (default offline-stub); PROFILE_DIR overrides where
+    artifacts live. The profile is configuration, independent of
+    which model is injected.
 """
 
 from __future__ import annotations
@@ -36,6 +40,10 @@ class Settings:
     ollama_base_url: str = "http://localhost:11434/v1"
     ollama_model: str = "llama3.1"
     api_key: str | None = None
+    # Harness profile selection (profiles.py). The profile is loaded
+    # and validated at service startup; a bad profile refuses startup.
+    profile_id: str = "offline-stub"
+    profile_dir: str | None = None
 
     @property
     def store_backend(self) -> str:
@@ -67,6 +75,8 @@ def load_settings(**overrides) -> Settings:
         ollama_base_url=env.get("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
         ollama_model=env.get("OLLAMA_MODEL", "llama3.1"),
         api_key=env.get("API_KEY") or None,
+        profile_id=env.get("PROFILE_ID") or "offline-stub",
+        profile_dir=env.get("PROFILE_DIR") or None,
     )
     values.update({k: v for k, v in overrides.items() if v is not None})
     return Settings(**values)
