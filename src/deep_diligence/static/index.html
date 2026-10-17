@@ -129,13 +129,15 @@ async function openCase(caseId) {
   const budget = await api(`/api/cases/${caseId}/budget`);
   const usage = (budget.usage && budget.usage.execution) || {};
   const planUsage = (budget.usage && budget.usage.planning) || {};
-  const [plan, findings, evidence, audit, report] = await Promise.all([
+  const [plan, findings, evidence, audit, report, ledger] = await Promise.all([
     api(`/api/cases/${caseId}/plan`).catch(() => null),
     api(`/api/cases/${caseId}/findings`),
     api(`/api/cases/${caseId}/evidence`),
     api(`/api/cases/${caseId}/audit`),
     api(`/api/cases/${caseId}/report`).catch(() => null),
+    api(`/api/cases/${caseId}/ledger`).catch(() => null),
   ]);
+  const driftIds = new Set(((ledger && ledger.verification && ledger.verification.drift) || []).map(d => d.evidence_id));
   const canPlan = ["INTAKE", "PLAN_REJECTED"].includes(c.status);
   const canExecute = ["APPROVED", "REPORT_REJECTED"].includes(c.status);
   const canDecidePlan = c.status === "PLAN_READY";
@@ -182,6 +184,12 @@ async function openCase(caseId) {
       <div class="panel"><h3>Report draft ${report ? `(${esc(report.status)}${report.partial ? ", partial" : ""})` : ""}</h3>
         ${report ? `<div class="md">${md(report.markdown)}</div>` : '<p class="muted">No report yet.</p>'}
       </div>
+    </div>
+    <div class="panel" style="margin-top:16px"><h3>Citation ledger ${ledger ? `(${ledger.entries.length} claims · verification: ${esc(ledger.verification.status)})` : ""}</h3>
+      ${ledger && ledger.verification.status === "EVIDENCE_DRIFT" ? `<p style="color:#B42318"><strong>EVIDENCE_DRIFT</strong> — cited evidence changed after citation; this report cannot be approved until the ledger re-verifies clean.</p>` : ""}
+      ${ledger && ledger.entries.length ? `<table><tr><th>Claim</th><th>Finding</th><th>Claim text</th><th>Evidence</th><th>sha256 at citation</th><th>Status</th></tr>
+        ${ledger.entries.flatMap(e => e.citations.map(cit => `<tr><td>${esc(e.claim_id)}</td><td>${esc(e.finding_id)}</td><td>${esc(e.claim)}</td><td><a class="ev" data-ev="${cit.evidence_id}">[${cit.evidence_id}]</a></td><td>${esc(cit.sha256.slice(0, 12))}…</td><td>${driftIds.has(cit.evidence_id) ? '<span style="color:#B42318;font-weight:700">DRIFT</span>' : "verified"}</td></tr>`)).join("")}
+        </table>` : '<p class="muted">No ledger yet — it is built when a report is composed.</p>'}
     </div>
     <div class="panel" style="margin-top:16px"><h3>Audit trail (${audit.length})</h3>
       <table><tr><th>Time</th><th>Event</th><th>Detail</th></tr>
