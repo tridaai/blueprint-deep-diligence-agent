@@ -19,6 +19,13 @@ execution — which the independent verifier must quarantine with the
 expected reasons. Across every pack, the final reports are re-checked
 claim by claim: unsupported claims in final reports must be 0.
 
+Every pack also plants contradictions between documents, and the
+conflict gate grades them: each planted pair must yield exactly one
+conflict record carrying both gold values, and the pack must yield
+no other conflicts — facts from different periods (an FY2024 margin
+against its FY2025 successor) are different keys and must never
+conflict.
+
 Exit code 0 only when every gate passes for every case.
 """
 
@@ -33,7 +40,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from deep_diligence.config import load_settings  # noqa: E402
-from deep_diligence.corpus import GOLD_CASES, INTEGRITY_CASES  # noqa: E402
+from deep_diligence.conflicts import extract_assertions  # noqa: E402
+from deep_diligence.corpus import CORPUS, GOLD_CASES, INTEGRITY_CASES  # noqa: E402
 from deep_diligence.evidence import evidence_text  # noqa: E402
 from deep_diligence.models import BriefIn  # noqa: E402
 from deep_diligence.service import CaseService  # noqa: E402
@@ -41,6 +49,31 @@ from deep_diligence.verifier import check_claim  # noqa: E402
 
 RECALL_GATE = 0.90
 FIGURE = re.compile(r"\$[\d,.]+(?:\.\d+)?[MBK]?|\d+(?:\.\d+)?%")
+FACT_TEXTS = {f.id: f.text for d in CORPUS for f in d.facts}
+
+
+def expected_conflict(fact_a: str, fact_b: str) -> dict | None:
+    """The gold disagreement between two planted facts: the
+    (metric, period) both assert with different values, and the two
+    values as stated. Derived from the fact texts with the same
+    deterministic extraction the pipeline uses."""
+    assertions_a = {
+        (a["metric"], a["period"]): a for a in extract_assertions(FACT_TEXTS[fact_a])
+    }
+    assertions_b = {
+        (a["metric"], a["period"]): a for a in extract_assertions(FACT_TEXTS[fact_b])
+    }
+    for key in assertions_a:
+        if key in assertions_b and assertions_a[key]["value"] != assertions_b[key]["value"]:
+            return {
+                "metric": key[0],
+                "period": key[1],
+                "values": {
+                    assertions_a[key]["value_text"],
+                    assertions_b[key]["value_text"],
+                },
+            }
+    return None
 
 
 def run_case(gold: dict) -> dict:
@@ -158,6 +191,33 @@ def run_case(gold: dict) -> dict:
                 or poison["claim"] in report["markdown"],
             }
         )
+    # Conflict grading: every planted contradiction must surface as
+    # exactly one conflict record carrying both gold values, and the
+    # pack must hold no other conflicts — period-distinct facts are
+    # different keys and can never create one.
+    conflict_records = service.store.list_conflicts(case_id)
+    conflict_results = []
+    for fact_a, fact_b in gold.get("contradictions", []):
+        expected = expected_conflict(fact_a, fact_b)
+        matching = [
+            r
+            for r in conflict_records
+            if expected is not None
+            and r["key"]["metric"] == expected["metric"]
+            and r["key"]["period"] == expected["period"]
+            and {s["value_text"] for s in r["sides"]} == expected["values"]
+        ]
+        conflict_results.append(
+            {
+                "pair": [fact_a, fact_b],
+                "expected": expected,
+                "records": len(matching),
+                "ok": len(matching) == 1,
+            }
+        )
+    conflicts_ok = all(c["ok"] for c in conflict_results) and len(
+        conflict_records
+    ) == len(gold.get("contradictions", []))
     verifier_report = service.store.get_verifier_report(case_id) or {}
     usage = case["usage"].get("execution", {})
     budget = gold["brief"]["budget"]
@@ -177,6 +237,9 @@ def run_case(gold: dict) -> dict:
         "citation_checks": citation_checks,
         "unsupported": unsupported,
         "poison_results": poison_results,
+        "conflict_results": conflict_results,
+        "conflicts_detected": len(conflict_records),
+        "conflicts_ok": conflicts_ok,
         "verification": {
             "checked": verifier_report.get("checked"),
             "supported": verifier_report.get("supported"),
@@ -204,6 +267,7 @@ def main() -> int:
             and result["correctness"] == 1.0
             and checks_ok
             and poison_ok
+            and result["conflicts_ok"]
             and not result["unsupported"]
             and result["budget_compliant"]
         )
@@ -236,6 +300,19 @@ def main() -> int:
                 f"quarantined {'OK' if poison['quarantined'] and poison['reason_ok'] else 'FAILED'}"
                 f", in final report {'YES — GATE FAILURE' if poison['in_report'] else 'no'}"
             )
+        for conflict in result["conflict_results"]:
+            expected = conflict["expected"] or {}
+            values = " vs ".join(sorted(expected.get("values", [])))
+            print(
+                f"  conflict {'/'.join(conflict['pair'])} -> "
+                f"{expected.get('metric')} {expected.get('period')}: "
+                f"{values} — {conflict['records']} record(s) "
+                f"{'OK' if conflict['ok'] else 'FAILED'}"
+            )
+        print(
+            f"  conflicts detected: {result['conflicts_detected']} "
+            f"(gate: exactly the planted contradictions, no others)"
+        )
         print(
             f"  unsupported claims in final report: "
             f"{len(result['unsupported'])} (gate 0)"
