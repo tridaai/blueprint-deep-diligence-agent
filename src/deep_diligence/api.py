@@ -419,6 +419,23 @@ def create_app(
         # folded from the budget ledger in the audit trail.
         return budget_view(case, service.store.list_audit(case_id))
 
+    @app.get("/api/cases/{case_id}/cost")
+    def get_cost(case_id: str) -> dict:
+        get_case_or_404(case_id)
+        # Budget-vs-actual joined with the cost ledger: granted vs
+        # consumed from the budget ledger, and the priced cost —
+        # totals and breakdowns by phase, sub-agent role, and
+        # model — folded from the cost lines recorded when each
+        # run ended, each pinned to its price-table version.
+        return service.cost_report(case_id)
+
+    @app.get("/api/costs")
+    def get_costs() -> dict:
+        # Every case's recorded cost and the desk's total: a sum
+        # of the per-case ledgers, each of which keeps its own
+        # detail at /api/cases/{id}/cost.
+        return service.cost_totals()
+
     @app.post(
         "/api/cases/{case_id}/budget/amendment",
         dependencies=[Depends(require_api_key)],

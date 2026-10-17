@@ -313,6 +313,7 @@ _EVENT_LABELS = {
     "evidence_drift_detected": "Evidence drift detected",
     "budget_granted": "Budget granted",
     "budget_consumed": "Budget consumed",
+    "cost_recorded": "Run cost recorded",
     "budget_exceeded": "Budget exceeded",
     "budget_amended": "Budget amended",
     "case_note_added": "Analyst note",

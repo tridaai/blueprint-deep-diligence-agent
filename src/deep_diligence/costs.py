@@ -371,9 +371,10 @@ def _absorb(bucket: dict, line: dict) -> None:
 
 def _finish_bucket(bucket: dict) -> dict:
     bases = bucket.pop("_bases")
+    cost = bucket.pop("cost")
     return {
         **bucket,
-        "cost_usd": _money(bucket.pop("cost")),
+        "cost_usd": _money(cost),
         "usage_basis": _combined_basis(bases) if bases else None,
     }
 

@@ -276,7 +276,7 @@ async function openCase(caseId) {
       ${bar("Steps", phase.consumed.steps, phase.granted.max_steps)}
       ${bar("Tokens", phase.consumed.tokens, phase.granted.max_tokens)}`;
   };
-  const [plan, findings, evidence, audit, timeline, report, ledger, verification, quarantine, conflicts, workstreams, checkpoint, notes, versions, provenance, caseSources, redactionData, sectionNotes] = await Promise.all([
+  const [plan, findings, evidence, audit, timeline, report, ledger, verification, quarantine, conflicts, workstreams, checkpoint, notes, versions, provenance, caseSources, redactionData, sectionNotes, costReport] = await Promise.all([
     api(`/api/cases/${caseId}/plan`).catch(() => null),
     api(`/api/cases/${caseId}/findings`),
     api(`/api/cases/${caseId}/evidence`),
@@ -295,6 +295,7 @@ async function openCase(caseId) {
     api(`/api/cases/${caseId}/sources`).catch(() => null),
     api(`/api/cases/${caseId}/redactions`).catch(() => ({redactions: [], flags: []})),
     api(`/api/cases/${caseId}/report/notes`).catch(() => []),
+    api(`/api/cases/${caseId}/cost`).catch(() => null),
   ]);
   const driftIds = new Set(((ledger && ledger.verification && ledger.verification.drift) || []).map(d => d.evidence_id));
   const canPlan = ["INTAKE", "PLAN_REJECTED"].includes(c.status);
@@ -341,6 +342,10 @@ async function openCase(caseId) {
         ${bar("Wall clock (s)", view.case.consumed.wall_seconds, view.case.granted.max_wall_seconds)}
         ${view.exhaustions.length ? `<h3 style="margin-top:14px">Exhaustions</h3>` + view.exhaustions.map(e => `<div class="finding"><strong style="color:#B42318">${esc(e.kind)}</strong> during ${esc(e.phase || "execution")} — limit ${e.limit}, observed ${e.observed}</div>`).join("") : ""}
         ${view.amendments.length ? `<h3 style="margin-top:14px">Amendments</h3>` + view.amendments.map(a => `<div class="finding">Amended by ${esc(a.analyst)} — "${esc(a.reason)}"</div>`).join("") : ""}
+        ${costReport ? `<h3 style="margin-top:14px">Cost — what this case cost to run</h3>
+        <div class="finding">Recorded cost: <strong>$${Number(costReport.cost.totals.cost_usd || 0).toFixed(6)}</strong> — ${costReport.cost.totals.calls} model call(s), ${costReport.cost.totals.total_tokens} tokens, against the granted budgets in the bars above.</div>
+        <div class="muted">${esc(costReport.usage_label)}. Priced under price table ${(costReport.price_tables_recorded || []).map(t => `v${t.version}`).join(", ") || "—"} (current table: v${costReport.price_table_current ? costReport.price_table_current.version : "—"}); the recorded lines stand under the version that priced them — a newer table re-prices nothing here.</div>
+        ${[["By phase", costReport.cost.by_phase], ["By sub-agent role", costReport.cost.by_role], ["By model", costReport.cost.by_model]].map(([title, buckets]) => buckets && Object.keys(buckets).length ? `<div class="muted" style="margin-top:8px">${title}</div>` + Object.entries(buckets).map(([k, b]) => `<div class="finding"><strong>${esc(k)}</strong> — ${b.calls} call(s) · ${b.total_tokens} tokens (${b.input_tokens} in / ${b.output_tokens} out${b.other_tokens ? ` / ${b.other_tokens} other` : ""}) — <strong>$${Number(b.cost_usd || 0).toFixed(6)}</strong>${b.usage_basis && b.usage_basis !== "measured" ? ` · ${esc(b.usage_basis)}` : ""}${b.unpriced_tokens ? ` · ${b.unpriced_tokens} tokens unpriced (no table entry)` : ""}</div>`).join("") : "").join("")}` : ""}
         ${c.status === "BUDGET_EXHAUSTED" ? `
         <h3 style="margin-top:14px">Amend the budget</h3>
         <p class="muted" style="margin-top:0">Raise the caps and the case returns to APPROVED for re-execution. The exhaustion and this amendment stay in the ledger. No cap may be set below what the case has already consumed. Leave a phase field blank to inherit the flat value.</p>
