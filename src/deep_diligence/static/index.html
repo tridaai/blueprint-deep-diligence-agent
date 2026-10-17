@@ -127,8 +127,13 @@ async function openCase(caseId) {
   current = caseId;
   const c = await api(`/api/cases/${caseId}`);
   const budget = await api(`/api/cases/${caseId}/budget`);
-  const usage = (budget.usage && budget.usage.execution) || {};
-  const planUsage = (budget.usage && budget.usage.planning) || {};
+  const view = budget.view || {phases: {}, case: {granted: {}, consumed: {}}, exhaustions: [], amendments: []};
+  const phaseBlock = (key, label) => {
+    const phase = view.phases[key] || {granted: {}, consumed: {}};
+    return `<div class="muted" style="margin-top:8px">${label} phase (granted vs consumed, from the budget ledger)</div>
+      ${bar("Steps", phase.consumed.steps, phase.granted.max_steps)}
+      ${bar("Tokens", phase.consumed.tokens, phase.granted.max_tokens)}`;
+  };
   const [plan, findings, evidence, audit, report, ledger, verification, quarantine, conflicts] = await Promise.all([
     api(`/api/cases/${caseId}/plan`).catch(() => null),
     api(`/api/cases/${caseId}/findings`),
@@ -164,11 +169,29 @@ async function openCase(caseId) {
     <div class="grid">
       <div class="panel"><h3>Brief</h3>
         ${c.brief.questions.map(q => `<div class="finding"><strong>${esc(q.id)}</strong> (${esc(q.workstream)}) — ${esc(q.text)}</div>`).join("")}
-        <h3 style="margin-top:14px">Budget vs execution usage</h3>
-        ${bar("Steps", usage.steps, budget.budget.max_steps)}
-        ${bar("Sub-agents", usage.subagents, budget.budget.max_subagents)}
-        ${bar("Tokens", usage.tokens, budget.budget.max_tokens)}
-        <div class="muted">Planning usage: ${planUsage.steps || 0} steps · ${planUsage.tokens || 0} tokens</div>
+        <h3 style="margin-top:14px">Budget — per phase, from the ledger</h3>
+        ${phaseBlock("planning", "Planning")}
+        ${phaseBlock("execution", "Execution")}
+        <div class="muted" style="margin-top:8px">Case-level caps (consumed across phases)</div>
+        ${bar("Sub-agents", view.case.consumed.subagents, view.case.granted.max_subagents)}
+        ${bar("Wall clock (s)", view.case.consumed.wall_seconds, view.case.granted.max_wall_seconds)}
+        ${view.exhaustions.length ? `<h3 style="margin-top:14px">Exhaustions</h3>` + view.exhaustions.map(e => `<div class="finding"><strong style="color:#B42318">${esc(e.kind)}</strong> during ${esc(e.phase || "execution")} — limit ${e.limit}, observed ${e.observed}</div>`).join("") : ""}
+        ${view.amendments.length ? `<h3 style="margin-top:14px">Amendments</h3>` + view.amendments.map(a => `<div class="finding">Amended by ${esc(a.analyst)} — "${esc(a.reason)}"</div>`).join("") : ""}
+        ${c.status === "BUDGET_EXHAUSTED" ? `
+        <h3 style="margin-top:14px">Amend the budget</h3>
+        <p class="muted" style="margin-top:0">Raise the caps and the case returns to APPROVED for re-execution. The exhaustion and this amendment stay in the ledger. No cap may be set below what the case has already consumed. Leave a phase field blank to inherit the flat value.</p>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
+          <label class="muted">Execution steps <input id="am-e-steps" type="number" value="${(c.brief.budget.execution && c.brief.budget.execution.max_steps) || c.brief.budget.max_steps}"></label>
+          <label class="muted">Execution tokens <input id="am-e-tokens" type="number" value="${(c.brief.budget.execution && c.brief.budget.execution.max_tokens) || c.brief.budget.max_tokens}"></label>
+          <label class="muted">Planning steps <input id="am-p-steps" type="number" placeholder="${c.brief.budget.max_steps}" value="${(c.brief.budget.planning && c.brief.budget.planning.max_steps) || ""}"></label>
+          <label class="muted">Planning tokens <input id="am-p-tokens" type="number" placeholder="${c.brief.budget.max_tokens}" value="${(c.brief.budget.planning && c.brief.budget.planning.max_tokens) || ""}"></label>
+          <label class="muted">Sub-agents (case) <input id="am-subagents" type="number" value="${c.brief.budget.max_subagents}"></label>
+          <label class="muted">Wall clock s (case) <input id="am-wall" type="number" value="${c.brief.budget.max_wall_seconds}"></label>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <input id="am-reason" type="text" placeholder="Reason for the amendment (recorded, required)" style="flex:1">
+          <button id="act-amend" class="secondary">Amend budget &amp; re-approve</button>
+        </div>` : ""}
       </div>
       <div class="panel"><h3>Plan ${plan ? `(v${plan.version}, ${esc(plan.status)})` : ""}</h3>
         ${plan ? `<div class="md">${md(plan.markdown)}</div>` : '<p class="muted">No plan yet.</p>'}
@@ -185,6 +208,9 @@ async function openCase(caseId) {
         <div id="ev-view"></div>
       </div>
       <div class="panel"><h3>Report draft ${report ? `(${esc(report.status)}${report.partial ? ", partial" : ""})` : ""}</h3>
+        ${report && report.coverage_detail ? `<div style="margin-bottom:10px"><div class="muted">Coverage (partial report — stopped on its ${esc(report.exceeded_kind || "budget")} budget during ${esc(report.exceeded_phase || "execution")})</div>
+          ${report.coverage_detail.map(r => `<div class="finding"><strong>${esc(r.question_id)}</strong> — ${esc(r.status)} (${r.findings} finding(s))</div>`).join("")}
+          ${report.approved_coverage ? `<div class="muted">This coverage is what the approving analyst approved.</div>` : ""}</div>` : ""}
         ${report ? `<div class="md">${md(report.markdown)}</div>` : '<p class="muted">No report yet.</p>'}
       </div>
     </div>
@@ -252,6 +278,28 @@ async function openCase(caseId) {
   }));
   qact("qback", "reinvestigate");
   qact("qdrop", "drop");
+  const amendBtn = $("#act-amend");
+  if (amendBtn) amendBtn.addEventListener("click", async () => {
+    const num = id => { const v = document.getElementById(id).value; return v === "" ? null : parseInt(v, 10); };
+    const reason = document.getElementById("am-reason").value.trim();
+    if (!reason) { alert("A budget amendment requires a recorded reason."); return; }
+    amendBtn.disabled = true;
+    try {
+      await api(`/api/cases/${caseId}/budget/amendment`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({
+        analyst: "Console Analyst",
+        reason,
+        budget: {
+          max_steps: c.brief.budget.max_steps,
+          max_subagents: parseInt(document.getElementById("am-subagents").value, 10),
+          max_tokens: c.brief.budget.max_tokens,
+          max_wall_seconds: parseInt(document.getElementById("am-wall").value, 10),
+          planning: {max_steps: num("am-p-steps"), max_tokens: num("am-p-tokens")},
+          execution: {max_steps: num("am-e-steps"), max_tokens: num("am-e-tokens")},
+        },
+      })});
+    } catch (e) { alert(e.message); }
+    await refreshCases(); await openCase(caseId);
+  });
   document.querySelectorAll("[data-cnote]").forEach(el => el.addEventListener("click", async () => {
     const input = document.getElementById(`cnote-${el.dataset.cnote}`);
     const note = input ? input.value.trim() : "";

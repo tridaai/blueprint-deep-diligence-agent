@@ -13,12 +13,20 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 
+from .budgets import budget_view
 from .config import Settings, load_settings
 from .corpus import GOLD_CASES, companies
 from .evidence import evidence_text
 from .ledger import verify_ledger
 from .logging_setup import configure_logging, new_request_id
-from .models import BriefIn, CaseOut, ConflictNoteIn, DecisionIn, QuarantineDecisionIn
+from .models import (
+    BriefIn,
+    BudgetAmendIn,
+    CaseOut,
+    ConflictNoteIn,
+    DecisionIn,
+    QuarantineDecisionIn,
+)
 from .service import CaseService, GateError
 
 log = logging.getLogger("deep_diligence.api")
@@ -260,7 +268,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/cases/{case_id}/budget")
     def get_budget(case_id: str) -> dict:
         case = get_case_or_404(case_id)
-        return {"budget": case["brief"]["budget"], "usage": case.get("usage", {})}
+        # Granted comes from the case's current budget; consumed is
+        # folded from the budget ledger in the audit trail.
+        return budget_view(case, service.store.list_audit(case_id))
+
+    @app.post(
+        "/api/cases/{case_id}/budget/amendment",
+        dependencies=[Depends(require_api_key)],
+    )
+    def amend_budget(case_id: str, amendment: BudgetAmendIn) -> dict:
+        get_case_or_404(case_id)
+        try:
+            case = service.amend_budget(
+                case_id,
+                amendment.analyst,
+                amendment.reason,
+                amendment.budget,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except GateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return CaseOut(**case).model_dump()
 
     return app
 
