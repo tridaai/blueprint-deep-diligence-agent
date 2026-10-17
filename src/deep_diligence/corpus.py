@@ -420,9 +420,18 @@ def _gold_facts(subject_ref: str) -> dict[str, str]:
     return gold
 
 
+# The eval split, fixed here in the eval data — never chosen per
+# run. The TUNING cases are the ones a profile author iterates
+# against; the HELD-OUT cases are the ones the profile regression
+# gate (promotion.py) judges on, so a profile tuned to the tuning
+# cases still has to earn its promotion on cases it was not tuned
+# against. The integrity pack is held out: its stale-figure trap and
+# poisoned findings are exactly the behaviour a promotion must not
+# be able to rehearse. Every pack sits in exactly one subset.
 GOLD_CASES: tuple[dict, ...] = (
     {
         "key": "gold-helvion-vendor",
+        "split": "tuning",
         "brief": {
             "subject": "Helvion Grid Systems",
             "subject_ref": "helvion-grid",
@@ -440,6 +449,7 @@ GOLD_CASES: tuple[dict, ...] = (
     },
     {
         "key": "gold-copperline-acquisition",
+        "split": "tuning",
         "brief": {
             "subject": "Copperline Provisions",
             "subject_ref": "copperline-provisions",
@@ -457,6 +467,7 @@ GOLD_CASES: tuple[dict, ...] = (
     },
     {
         "key": "gold-selene-partnership",
+        "split": "held_out",
         "brief": {
             "subject": "Selene Diagnostics",
             "subject_ref": "selene-diagnostics",
@@ -493,6 +504,7 @@ GOLD_CASES: tuple[dict, ...] = (
 INTEGRITY_CASES: tuple[dict, ...] = (
     {
         "key": "integrity-aster-citation",
+        "split": "held_out",
         "brief": {
             "subject": "Aster Foundry",
             "subject_ref": "aster-foundry",
@@ -537,3 +549,11 @@ INTEGRITY_CASES: tuple[dict, ...] = (
         ],
     },
 )
+
+
+ALL_CASES: tuple[dict, ...] = GOLD_CASES + INTEGRITY_CASES
+
+# Case key -> eval subset ("tuning" | "held_out"), read off the case
+# records themselves. The promotion gate consumes this map; it never
+# re-decides which cases are held out.
+PACK_SPLITS: dict[str, str] = {case["key"]: case["split"] for case in ALL_CASES}
