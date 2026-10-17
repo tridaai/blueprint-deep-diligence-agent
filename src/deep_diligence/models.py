@@ -23,11 +23,24 @@ STATUSES = (
 )
 
 
+class PhaseBudgetIn(BaseModel):
+    """Per-phase overrides for the two caps a single run consumes on
+    its own. A field left unset derives from the brief's flat value,
+    so a brief written before phases existed behaves exactly as it
+    did. Sub-agent spawns and wall clock are not phase caps: they
+    are case-level, consumed across both phases (see budgets.py)."""
+
+    max_steps: int | None = Field(default=None, ge=1, le=2000)
+    max_tokens: int | None = Field(default=None, ge=1, le=10_000_000)
+
+
 class BudgetIn(BaseModel):
     max_steps: int = Field(default=80, ge=1, le=2000)
     max_subagents: int = Field(default=8, ge=0, le=64)
     max_tokens: int = Field(default=250_000, ge=1, le=10_000_000)
     max_wall_seconds: int = Field(default=900, ge=5, le=86_400)
+    planning: PhaseBudgetIn = Field(default_factory=PhaseBudgetIn)
+    execution: PhaseBudgetIn = Field(default_factory=PhaseBudgetIn)
 
 
 class QuestionIn(BaseModel):
@@ -57,6 +70,14 @@ class DecisionIn(BaseModel):
     analyst: str = Field(min_length=1, max_length=120)
     approve: bool
     note: str = Field(default="", max_length=2000)
+
+
+class BudgetAmendIn(BaseModel):
+    analyst: str = Field(min_length=1, max_length=120)
+    # An amendment without a recorded reason is not an amendment;
+    # the reason is part of the budget ledger, permanently.
+    reason: str = Field(min_length=1, max_length=2000)
+    budget: BudgetIn
 
 
 class ConflictNoteIn(BaseModel):
