@@ -39,6 +39,7 @@ from .ledger import verify_ledger
 from .llm import build_model
 from .models import BudgetIn, BriefIn
 from .objects import ObjectStore, build_object_store
+from .profiles import load_profile
 from .store import Store, build_store, utcnow
 from .tools import build_case_tools
 from .verifier import verify_case
@@ -53,8 +54,20 @@ class GateError(RuntimeError):
 class CaseService:
     def __init__(self, settings: Settings):
         self.settings = settings
+        # The active harness profile is loaded and validated before
+        # anything else: a profile that refuses to load refuses the
+        # startup with it (fail-closed, no silent fallback). The
+        # model is injected separately by the provider boundary; the
+        # profile is configuration.
+        self.profile = load_profile(settings.profile_id, settings.profile_dir)
         self.store: Store = build_store(settings)
         self.objects: ObjectStore = build_object_store(settings)
+        log.info(
+            "harness profile %s v%d (target %s)",
+            self.profile.id,
+            self.profile.version,
+            self.profile.target_model,
+        )
 
     # -- helpers ------------------------------------------------------------
     def _require_case(self, case_id: str) -> dict:
@@ -86,7 +99,10 @@ class CaseService:
         backend = self._backend(case_id)
         tools = build_case_tools(self.store, self.objects, case)
         agent = build_agent(
-            model=build_model(self.settings), backend=backend, case_tools=tools
+            model=build_model(self.settings),
+            backend=backend,
+            case_tools=tools,
+            profile=self.profile,
         )
         budget = case["brief"]["budget"]
         phase_caps = resolve_phase_budget(budget, phase)
@@ -97,7 +113,15 @@ class CaseService:
         self.store.add_audit(
             case_id,
             "budget_granted",
-            {"phase": phase, "caps": phase_caps, "case_caps": caps},
+            {
+                "phase": phase,
+                "caps": phase_caps,
+                "case_caps": caps,
+                # Every run records the profile it ran under, so the
+                # audit trail attributes planning and execution to a
+                # profile id + version, not just to a date.
+                "profile": self.profile.record(),
+            },
         )
         sink: list = []
         guard = BudgetGuard(
@@ -141,12 +165,20 @@ class CaseService:
             "analyst": brief.analyst,
             "brief": brief.model_dump(),
             "usage": {},
+            # The profile stamp: this case's planning and execution
+            # run under this profile (id + version), and the case
+            # view shows it.
+            "profile": self.profile.record(),
             "created_at": now,
             "updated_at": now,
         }
         self.store.create_case(case)
         evidence = ingest_case_evidence(self.store, self.objects, case)
-        self.store.add_audit(case_id, "case_created", {"subject": brief.subject})
+        self.store.add_audit(
+            case_id,
+            "case_created",
+            {"subject": brief.subject, "profile": self.profile.record()},
+        )
         self.store.add_audit(
             case_id, "evidence_ingested", {"count": len(evidence)}
         )

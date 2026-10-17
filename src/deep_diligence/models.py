@@ -104,5 +104,9 @@ class CaseOut(BaseModel):
     analyst: str
     brief: dict[str, Any]
     usage: dict[str, Any] = Field(default_factory=dict)
+    # The harness profile (id, version, target model) stamped on the
+    # case at intake — the profile that ran its planning and
+    # execution. Empty for cases created before profiles existed.
+    profile: dict[str, Any] = Field(default_factory=dict)
     created_at: str
     updated_at: str

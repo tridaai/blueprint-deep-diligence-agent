@@ -156,7 +156,7 @@ async function openCase(caseId) {
     <div style="display:flex;align-items:baseline;gap:12px">
       <h2 style="font-size:20px;color:var(--ink);letter-spacing:0;text-transform:none;margin:0">${esc(c.subject)}</h2>
       <span class="status">${esc(c.status)}</span>
-      <span class="muted">${esc(c.case_id)} · commissioned by ${esc(c.analyst)}</span>
+      <span class="muted">${esc(c.case_id)} · commissioned by ${esc(c.analyst)}${c.profile && c.profile.id ? ` · profile ${esc(c.profile.id)} v${esc(String(c.profile.version))}` : ""}</span>
     </div>
     <div class="row">
       <button id="act-plan" ${canPlan ? "" : "disabled"}>Run planning</button>
