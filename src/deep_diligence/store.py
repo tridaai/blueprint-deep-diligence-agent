@@ -575,6 +575,111 @@ class Store:
         promotions = self.list_promotions()
         return promotions[-1] if promotions else None
 
+    # -- execution checkpoints --------------------------------------------------
+    def save_checkpoint(self, case_id: str, checkpoint: dict) -> dict:
+        # One row per case, replaced as execution progresses: the
+        # checkpoint is the execution's own record of where it got
+        # to, written by the shell as waves complete — never derived
+        # from harness state, so it survives the process.
+        existing = self.get_checkpoint(case_id)
+        if existing is None:
+            self._execute(
+                "INSERT INTO execution_checkpoints (case_id, payload, updated_at)"
+                " VALUES (?, ?, ?)",
+                (case_id, json.dumps(checkpoint), checkpoint["updated_at"]),
+            )
+        else:
+            self._execute(
+                "UPDATE execution_checkpoints SET payload = ?, updated_at = ?"
+                " WHERE case_id = ?",
+                (json.dumps(checkpoint), checkpoint["updated_at"], case_id),
+            )
+        return checkpoint
+
+    def get_checkpoint(self, case_id: str) -> dict | None:
+        row = self._fetchone(
+            "SELECT payload FROM execution_checkpoints WHERE case_id = ?",
+            (case_id,),
+        )
+        return json.loads(row["payload"]) if row else None
+
+    # -- case notes -------------------------------------------------------------
+    # The desk's memory of a case. Notes live in their own table —
+    # not in the evidence table and not in the virtual filesystem —
+    # so nothing in the citation machinery can mistake one for a
+    # source: a note ID is never an evidence ID.
+    def add_note(self, case_id: str, note: dict) -> dict:
+        with self._lock:
+            row = self._fetchone(
+                "SELECT COUNT(*) AS n FROM case_notes WHERE case_id = ?",
+                (case_id,),
+            )
+            note = {
+                **note,
+                "note_id": f"NOTE-{int(row['n']) + 1:04d}",
+                "case_id": case_id,
+            }
+            self._conn.execute(
+                self._sql(
+                    "INSERT INTO case_notes"
+                    " (note_id, case_id, analyst, payload, created_at)"
+                    " VALUES (?, ?, ?, ?, ?)"
+                ),
+                (
+                    note["note_id"],
+                    case_id,
+                    note["analyst"],
+                    json.dumps(note),
+                    note["created_at"],
+                ),
+            )
+            self._conn.commit()
+            return note
+
+    def list_notes(self, case_id: str) -> list[dict]:
+        rows = self._fetchall(
+            "SELECT payload FROM case_notes WHERE case_id = ?"
+            " ORDER BY note_id",
+            (case_id,),
+        )
+        return [json.loads(r["payload"]) for r in rows]
+
+    # -- report snapshots ---------------------------------------------------------
+    def add_report_snapshot(self, case_id: str, snapshot: dict) -> dict:
+        with self._lock:
+            row = self._fetchone(
+                "SELECT COUNT(*) AS n FROM report_snapshots WHERE case_id = ?",
+                (case_id,),
+            )
+            snapshot = {
+                **snapshot,
+                "snapshot_id": f"RSNAP-{int(row['n']) + 1:04d}",
+                "case_id": case_id,
+            }
+            self._conn.execute(
+                self._sql(
+                    "INSERT INTO report_snapshots"
+                    " (snapshot_id, case_id, payload, created_at)"
+                    " VALUES (?, ?, ?, ?)"
+                ),
+                (
+                    snapshot["snapshot_id"],
+                    case_id,
+                    json.dumps(snapshot),
+                    snapshot["created_at"],
+                ),
+            )
+            self._conn.commit()
+            return snapshot
+
+    def list_report_snapshots(self, case_id: str) -> list[dict]:
+        rows = self._fetchall(
+            "SELECT payload FROM report_snapshots WHERE case_id = ?"
+            " ORDER BY snapshot_id",
+            (case_id,),
+        )
+        return [json.loads(r["payload"]) for r in rows]
+
     # -- audit ------------------------------------------------------------------
     def add_audit(self, case_id: str, event: str, payload: dict | None = None) -> None:
         self._execute(
