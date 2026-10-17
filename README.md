@@ -441,7 +441,7 @@ the chain's schedule and handoff grade clean at recall **1.000**,
 and the failure variant's missing branch ends empty with its
 question NOT COVERED and the reason named, the case at
 DRAFT_READY. The pytest suite
-(213 tests) covers the gates, the budget caps, the evidence backend,
+(214 tests) covers the gates, the budget caps, the evidence backend,
 the citation rules, the ledger's drift gate, the verifier and
 quarantine, conflict detection and handling, per-phase budgets,
 the budget ledger, the partial-report protocol, amendment, the
