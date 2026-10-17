@@ -44,14 +44,20 @@ profile and its version, so every result is attributable to the
 profile that produced it. The default profile (offline-stub) is the
 gate: its run decides the exit code. A run under any other profile
 is reported for attribution and exits 0 when the run completes —
-whether that profile may be promoted is a separate decision the
-gate does not make here (an unloadable profile exits 2).
+whether that profile may be promoted is decided by the profile
+regression gate (promotion.py), not here (an unloadable profile
+exits 2).
+
+Subsets: the packs are partitioned in the eval data (corpus.py)
+into a TUNING subset and a HELD-OUT subset. This runner reports the
+two subsets separately — pooled recall and the zero-tolerance lines
+per subset — because the promotion gate judges a candidate profile
+on them: match the incumbent on tuning, do not regress on held-out.
 """
 
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 import tempfile
 from pathlib import Path
@@ -61,219 +67,20 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from deep_diligence.budgets import budget_view  # noqa: E402
 from deep_diligence.config import load_settings  # noqa: E402
-from deep_diligence.conflicts import extract_assertions  # noqa: E402
-from deep_diligence.corpus import CORPUS, GOLD_CASES, INTEGRITY_CASES  # noqa: E402
-from deep_diligence.evidence import evidence_text  # noqa: E402
+from deep_diligence.corpus import GOLD_CASES, INTEGRITY_CASES  # noqa: E402
+from deep_diligence.evaluation import evaluate_case  # noqa: E402
 from deep_diligence.models import BriefIn, BudgetIn  # noqa: E402
 from deep_diligence.profiles import ProfileError, load_profile  # noqa: E402
 from deep_diligence.service import CaseService  # noqa: E402
-from deep_diligence.verifier import check_claim  # noqa: E402
 
 DEFAULT_PROFILE = "offline-stub"
 
 RECALL_GATE = 0.90
-FIGURE = re.compile(r"\$[\d,.]+(?:\.\d+)?[MBK]?|\d+(?:\.\d+)?%")
-FACT_TEXTS = {f.id: f.text for d in CORPUS for f in d.facts}
 
-
-def expected_conflict(fact_a: str, fact_b: str) -> dict | None:
-    """The gold disagreement between two planted facts: the
-    (metric, period) both assert with different values, and the two
-    values as stated. Derived from the fact texts with the same
-    deterministic extraction the pipeline uses."""
-    assertions_a = {
-        (a["metric"], a["period"]): a for a in extract_assertions(FACT_TEXTS[fact_a])
-    }
-    assertions_b = {
-        (a["metric"], a["period"]): a for a in extract_assertions(FACT_TEXTS[fact_b])
-    }
-    for key in assertions_a:
-        if key in assertions_b and assertions_a[key]["value"] != assertions_b[key]["value"]:
-            return {
-                "metric": key[0],
-                "period": key[1],
-                "values": {
-                    assertions_a[key]["value_text"],
-                    assertions_b[key]["value_text"],
-                },
-            }
-    return None
-
-
-def run_case(gold: dict, profile_id: str = DEFAULT_PROFILE) -> dict:
-    scratch = Path(tempfile.mkdtemp(prefix="deep-diligence-eval-"))
-    settings = load_settings(
-        sqlite_path=str(scratch / "diligence.db"),
-        object_dir=str(scratch / "objects"),
-        migrations_dir=str(REPO_ROOT / "migrations"),
-        profile_id=profile_id,
-    )
-    service = CaseService(settings)
-    case = service.create_case(BriefIn(**gold["brief"]))
-    case_id = case["case_id"]
-    service.run_planning(case_id)
-    service.decide_plan(case_id, analyst="Eval Harness", approve=True)
-    # Poisoned findings (integrity pack): injected straight into the
-    # case record, standing in for a sub-agent overstating its
-    # evidence. Execution composes them like any other finding; the
-    # verifier is what stands between them and the report.
-    evidence_by_slug = {
-        ev["doc_slug"]: ev["evidence_id"]
-        for ev in service.store.list_evidence(case_id)
-    }
-    for poison in gold.get("poisoned_findings", []):
-        service.store.add_finding_auto_id(
-            case_id,
-            {
-                "question_id": poison["question_id"],
-                "claim": poison["claim"],
-                "evidence_ids": [evidence_by_slug[poison["doc_slug"]]],
-                "fact_ref": None,
-            },
-        )
-    report = service.run_execution(case_id)
-    case = service.store.get_case(case_id)
-    found = {
-        f["fact_ref"]
-        for f in service.store.list_findings(case_id)
-        if f.get("fact_ref")
-    }
-    gold_facts = set(gold["gold_facts"])
-    recall = len(found & gold_facts) / len(gold_facts) if gold_facts else 1.0
-    claims = report["claims"]
-    cited = [c for c in claims if c["evidence_ids"]]
-    citation = len(cited) / len(claims) if claims else 1.0
-    # Citation correctness: a figure stated in a claim must be
-    # supported by the evidence the claim actually cites.
-    evidence_by_id = {
-        ev["evidence_id"]: ev for ev in service.store.list_evidence(case_id)
-    }
-    figure_total = 0
-    figure_violations: list[dict] = []
-    for claim in claims:
-        figures = FIGURE.findall(claim["claim"])
-        if not figures:
-            continue
-        cited_text = "\n".join(
-            evidence_text(service.objects, evidence_by_id[eid])
-            for eid in claim["evidence_ids"]
-            if eid in evidence_by_id
-        )
-        for figure in figures:
-            figure_total += 1
-            if figure not in cited_text:
-                figure_violations.append(
-                    {"claim_id": claim.get("claim_id"), "figure": figure}
-                )
-    correctness = (
-        1.0 - len(figure_violations) / figure_total if figure_total else 1.0
-    )
-    # Per-case citation checks (integrity pack): a named finding must
-    # cite a named document — e.g. the current figure must rest on
-    # the current filing, not the stale near-duplicate.
-    findings = service.store.list_findings(case_id)
-    citation_checks = []
-    for check in gold.get("citation_checks", []):
-        matching = [f for f in findings if f.get("fact_ref") == check["fact_ref"]]
-        ok = any(
-            evidence_by_id[eid]["doc_slug"] == check["doc_slug"]
-            for f in matching
-            for eid in f["evidence_ids"]
-            if eid in evidence_by_id
-        )
-        citation_checks.append({**check, "ok": ok})
-    # Verifier grading: every claim in the final report is re-checked
-    # against the evidence it cites (unsupported claims in final
-    # reports must be 0 across all packs), and any poisoned finding
-    # must sit in quarantine with its expected reason, absent from
-    # the report body.
-    unsupported: list[dict] = []
-    for claim in report["claims"]:
-        texts = [
-            evidence_text(service.objects, evidence_by_id[eid])
-            for eid in claim["evidence_ids"]
-            if eid in evidence_by_id
-        ]
-        failures = check_claim(claim["claim"], texts)
-        if failures:
-            unsupported.append(
-                {"claim_id": claim.get("claim_id"), "failures": failures}
-            )
-    quarantine = service.store.list_quarantine(case_id)
-    poison_results = []
-    report_claim_texts = [c["claim"] for c in report["claims"]]
-    for poison in gold.get("poisoned_findings", []):
-        record = next(
-            (q for q in quarantine if q["claim"] == poison["claim"]), None
-        )
-        poison_results.append(
-            {
-                **poison,
-                "quarantined": record is not None,
-                "reason_ok": bool(record)
-                and record["reason"] == poison["expect_reason"],
-                "in_report": poison["claim"] in report_claim_texts
-                or poison["claim"] in report["markdown"],
-            }
-        )
-    # Conflict grading: every planted contradiction must surface as
-    # exactly one conflict record carrying both gold values, and the
-    # pack must hold no other conflicts — period-distinct facts are
-    # different keys and can never create one.
-    conflict_records = service.store.list_conflicts(case_id)
-    conflict_results = []
-    for fact_a, fact_b in gold.get("contradictions", []):
-        expected = expected_conflict(fact_a, fact_b)
-        matching = [
-            r
-            for r in conflict_records
-            if expected is not None
-            and r["key"]["metric"] == expected["metric"]
-            and r["key"]["period"] == expected["period"]
-            and {s["value_text"] for s in r["sides"]} == expected["values"]
-        ]
-        conflict_results.append(
-            {
-                "pair": [fact_a, fact_b],
-                "expected": expected,
-                "records": len(matching),
-                "ok": len(matching) == 1,
-            }
-        )
-    conflicts_ok = all(c["ok"] for c in conflict_results) and len(
-        conflict_records
-    ) == len(gold.get("contradictions", []))
-    verifier_report = service.store.get_verifier_report(case_id) or {}
-    usage = case["usage"].get("execution", {})
-    budget = gold["brief"]["budget"]
-    compliant = (
-        case["status"] == "DRAFT_READY"
-        and usage.get("steps", 10**9) <= budget["max_steps"]
-        and usage.get("subagents", 10**9) <= budget["max_subagents"]
-        and usage.get("tokens", 10**9) <= budget["max_tokens"]
-    )
-    return {
-        "key": gold["key"],
-        "profile": service.profile.record(),
-        "recall": recall,
-        "missing": sorted(gold_facts - found),
-        "citation": citation,
-        "correctness": correctness,
-        "figure_violations": figure_violations,
-        "citation_checks": citation_checks,
-        "unsupported": unsupported,
-        "poison_results": poison_results,
-        "conflict_results": conflict_results,
-        "conflicts_detected": len(conflict_records),
-        "conflicts_ok": conflicts_ok,
-        "verification": {
-            "checked": verifier_report.get("checked"),
-            "supported": verifier_report.get("supported"),
-            "quarantined": verifier_report.get("quarantined"),
-        },
-        "budget_compliant": compliant,
-        "usage": usage,
-    }
+# The per-case grading lives in deep_diligence.evaluation, shared
+# with the profile regression gate so both grade with the same
+# ruler. `run_case` stays as this runner's name for it.
+run_case = evaluate_case
 
 
 def run_budget_case(profile_id: str = DEFAULT_PROFILE) -> dict:
@@ -490,6 +297,20 @@ def main(argv: list[str] | None = None) -> int:
         if result["unsupported"]:
             print(f"  unsupported detail: {result['unsupported']}")
         print(f"  execution usage: {result['usage']}")
+    for split in ("tuning", "held_out"):
+        subset = [r for r in results if r["split"] == split]
+        found = sum(r["found"] for r in subset)
+        gold_count = sum(r["gold"] for r in subset)
+        pooled = found / gold_count if gold_count else 1.0
+        subset_unsupported = sum(len(r["unsupported"]) for r in subset)
+        print(
+            f"subset {split}: recall {pooled:.3f} ({found}/{gold_count} "
+            f"gold facts), citation "
+            f"{'1.000' if all(r['citation'] == 1.0 for r in subset) else 'BELOW 1.000'}, "
+            f"correctness "
+            f"{'1.000' if all(r['correctness'] == 1.0 for r in subset) else 'BELOW 1.000'}, "
+            f"unsupported claims {subset_unsupported} (gate 0)"
+        )
     budget_result = run_budget_case(profile_id=args.profile)
     budget_passed = (
         budget_result["status_after_stop"] == "BUDGET_EXHAUSTED"
