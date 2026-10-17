@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from .config import Settings, load_settings
 from .corpus import GOLD_CASES, companies
 from .evidence import evidence_text
+from .ledger import verify_ledger
 from .logging_setup import configure_logging, new_request_id
 from .models import BriefIn, CaseOut, DecisionIn
 from .service import CaseService, GateError
@@ -149,6 +150,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def list_findings(case_id: str) -> list[dict]:
         get_case_or_404(case_id)
         return service.store.list_findings(case_id)
+
+    @app.get("/api/cases/{case_id}/ledger")
+    def get_ledger(case_id: str) -> dict:
+        get_case_or_404(case_id)
+        return {
+            "case_id": case_id,
+            "entries": service.store.list_ledger(case_id),
+            # Verification is computed live on read: the hashes in the
+            # ledger against the evidence bytes as they are now.
+            "verification": verify_ledger(
+                service.store, service.objects, case_id
+            ),
+        }
 
     @app.get("/api/cases/{case_id}/report")
     def get_report(case_id: str) -> dict:

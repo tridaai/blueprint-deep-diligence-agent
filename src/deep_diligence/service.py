@@ -25,6 +25,7 @@ from .config import Settings
 from .corpus import companies
 from .evidence import ingest_case_evidence
 from .harness import build_agent, execute_message, plan_message
+from .ledger import verify_ledger
 from .llm import build_model
 from .models import BriefIn
 from .objects import ObjectStore, build_object_store
@@ -208,6 +209,36 @@ class CaseService:
         if case["status"] not in ("DRAFT_READY", "BUDGET_EXHAUSTED"):
             raise GateError(f"no report awaiting decision (status {case['status']})")
         report = self.store.get_report(case_id)
+        if approve:
+            # Citation integrity at the gate: re-verify the ledger
+            # against the evidence store before this report may become
+            # final. If any cited item's bytes no longer hash to the
+            # value recorded at citation time, the evidence changed
+            # after the fact — flag the report EVIDENCE_DRIFT and
+            # refuse the approval until a re-check comes back clean.
+            check = verify_ledger(self.store, self.objects, case_id)
+            if check["status"] != "OK":
+                report["integrity"] = {
+                    "status": "EVIDENCE_DRIFT",
+                    "drift": check["drift"],
+                    "checked_at": check["verified_at"],
+                }
+                self.store.save_report(case_id, report)
+                self.store.add_audit(
+                    case_id, "evidence_drift_detected", {"drift": check["drift"]}
+                )
+                drifted = ", ".join(
+                    sorted({d["evidence_id"] for d in check["drift"]})
+                )
+                raise GateError(
+                    "report is flagged EVIDENCE_DRIFT: cited evidence "
+                    f"changed after citation ({drifted}); it cannot be "
+                    "approved until the ledger re-verifies clean"
+                )
+            report["integrity"] = {
+                "status": "OK",
+                "checked_at": check["verified_at"],
+            }
         report["status"] = "APPROVED" if approve else "REJECTED"
         report["decided_by"] = analyst
         report["decision_note"] = note
