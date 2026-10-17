@@ -13,7 +13,11 @@ the bundled corpus and grades:
 
 The citation-integrity pack (INTEGRITY_CASES) adds a corpus with a
 near-duplicate document carrying a stale figure, and per-case
-citation checks: named findings must cite named documents.
+citation checks: named findings must cite named documents. It also
+carries poisoned findings — injected into the case record before
+execution — which the independent verifier must quarantine with the
+expected reasons. Across every pack, the final reports are re-checked
+claim by claim: unsupported claims in final reports must be 0.
 
 Exit code 0 only when every gate passes for every case.
 """
@@ -33,6 +37,7 @@ from deep_diligence.corpus import GOLD_CASES, INTEGRITY_CASES  # noqa: E402
 from deep_diligence.evidence import evidence_text  # noqa: E402
 from deep_diligence.models import BriefIn  # noqa: E402
 from deep_diligence.service import CaseService  # noqa: E402
+from deep_diligence.verifier import check_claim  # noqa: E402
 
 RECALL_GATE = 0.90
 FIGURE = re.compile(r"\$[\d,.]+(?:\.\d+)?[MBK]?|\d+(?:\.\d+)?%")
@@ -50,6 +55,24 @@ def run_case(gold: dict) -> dict:
     case_id = case["case_id"]
     service.run_planning(case_id)
     service.decide_plan(case_id, analyst="Eval Harness", approve=True)
+    # Poisoned findings (integrity pack): injected straight into the
+    # case record, standing in for a sub-agent overstating its
+    # evidence. Execution composes them like any other finding; the
+    # verifier is what stands between them and the report.
+    evidence_by_slug = {
+        ev["doc_slug"]: ev["evidence_id"]
+        for ev in service.store.list_evidence(case_id)
+    }
+    for poison in gold.get("poisoned_findings", []):
+        service.store.add_finding_auto_id(
+            case_id,
+            {
+                "question_id": poison["question_id"],
+                "claim": poison["claim"],
+                "evidence_ids": [evidence_by_slug[poison["doc_slug"]]],
+                "fact_ref": None,
+            },
+        )
     report = service.run_execution(case_id)
     case = service.store.get_case(case_id)
     found = {
@@ -101,6 +124,41 @@ def run_case(gold: dict) -> dict:
             if eid in evidence_by_id
         )
         citation_checks.append({**check, "ok": ok})
+    # Verifier grading: every claim in the final report is re-checked
+    # against the evidence it cites (unsupported claims in final
+    # reports must be 0 across all packs), and any poisoned finding
+    # must sit in quarantine with its expected reason, absent from
+    # the report body.
+    unsupported: list[dict] = []
+    for claim in report["claims"]:
+        texts = [
+            evidence_text(service.objects, evidence_by_id[eid])
+            for eid in claim["evidence_ids"]
+            if eid in evidence_by_id
+        ]
+        failures = check_claim(claim["claim"], texts)
+        if failures:
+            unsupported.append(
+                {"claim_id": claim.get("claim_id"), "failures": failures}
+            )
+    quarantine = service.store.list_quarantine(case_id)
+    poison_results = []
+    report_claim_texts = [c["claim"] for c in report["claims"]]
+    for poison in gold.get("poisoned_findings", []):
+        record = next(
+            (q for q in quarantine if q["claim"] == poison["claim"]), None
+        )
+        poison_results.append(
+            {
+                **poison,
+                "quarantined": record is not None,
+                "reason_ok": bool(record)
+                and record["reason"] == poison["expect_reason"],
+                "in_report": poison["claim"] in report_claim_texts
+                or poison["claim"] in report["markdown"],
+            }
+        )
+    verifier_report = service.store.get_verifier_report(case_id) or {}
     usage = case["usage"].get("execution", {})
     budget = gold["brief"]["budget"]
     compliant = (
@@ -117,6 +175,13 @@ def run_case(gold: dict) -> dict:
         "correctness": correctness,
         "figure_violations": figure_violations,
         "citation_checks": citation_checks,
+        "unsupported": unsupported,
+        "poison_results": poison_results,
+        "verification": {
+            "checked": verifier_report.get("checked"),
+            "supported": verifier_report.get("supported"),
+            "quarantined": verifier_report.get("quarantined"),
+        },
         "budget_compliant": compliant,
         "usage": usage,
     }
@@ -125,13 +190,21 @@ def run_case(gold: dict) -> dict:
 def main() -> int:
     results = [run_case(gold) for gold in (*GOLD_CASES, *INTEGRITY_CASES)]
     all_pass = True
+    total_unsupported = 0
     for result in results:
         checks_ok = all(c["ok"] for c in result["citation_checks"])
+        poison_ok = all(
+            p["quarantined"] and p["reason_ok"] and not p["in_report"]
+            for p in result["poison_results"]
+        )
+        total_unsupported += len(result["unsupported"])
         passed = (
             result["recall"] >= RECALL_GATE
             and result["citation"] == 1.0
             and result["correctness"] == 1.0
             and checks_ok
+            and poison_ok
+            and not result["unsupported"]
             and result["budget_compliant"]
         )
         all_pass = all_pass and passed
@@ -151,7 +224,29 @@ def main() -> int:
                 f"  citation check {check['fact_ref']} -> {check['doc_slug']}: "
                 f"{'OK' if check['ok'] else 'FAILED'}"
             )
+        verification = result["verification"]
+        print(
+            f"  verifier: {verification['checked']} checked, "
+            f"{verification['supported']} supported, "
+            f"{verification['quarantined']} quarantined"
+        )
+        for poison in result["poison_results"]:
+            print(
+                f"  poisoned finding ({poison['expect_reason']}): "
+                f"quarantined {'OK' if poison['quarantined'] and poison['reason_ok'] else 'FAILED'}"
+                f", in final report {'YES — GATE FAILURE' if poison['in_report'] else 'no'}"
+            )
+        print(
+            f"  unsupported claims in final report: "
+            f"{len(result['unsupported'])} (gate 0)"
+        )
+        if result["unsupported"]:
+            print(f"  unsupported detail: {result['unsupported']}")
         print(f"  execution usage: {result['usage']}")
+    print(
+        f"unsupported claims in final reports across all packs: "
+        f"{total_unsupported} (gate 0)"
+    )
     print("EVALS:", "PASS" if all_pass else "FAIL")
     return 0 if all_pass else 1
 

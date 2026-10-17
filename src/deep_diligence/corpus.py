@@ -483,6 +483,13 @@ GOLD_CASES: tuple[dict, ...] = (
 # the current figure's finding cites the current document, and — as in
 # every pack — every figure a claim states appears in the evidence it
 # cites (checked in evals/run_evals.py).
+#
+# The pack also carries poisoned findings: findings injected into the
+# case record before execution, standing in for a sub-agent (or a live
+# model) overstating its evidence. One overstates the filing's revenue
+# figure; the other names an entity its cited document never mentions.
+# Gold: the verifier quarantines both, with the expected reasons, and
+# neither appears in the final report.
 INTEGRITY_CASES: tuple[dict, ...] = (
     {
         "key": "integrity-aster-citation",
@@ -508,6 +515,25 @@ INTEGRITY_CASES: tuple[dict, ...] = (
         "contradictions": [["F-AST-101", "F-AST-901"]],
         "citation_checks": [
             {"fact_ref": "F-AST-101", "doc_slug": "aster-annual-report-fy2025"},
+        ],
+        "poisoned_findings": [
+            {
+                "question_id": "q1",
+                "claim": (
+                    "Revenue grew 11% year over year to $198M in FY2025."
+                ),
+                "doc_slug": "aster-annual-report-fy2025",
+                "expect_reason": "figure_not_in_evidence",
+            },
+            {
+                "question_id": "q2",
+                "claim": (
+                    "Aster Foundry supplies furnace castings to Helvion "
+                    "Grid Services under a long-term supply agreement."
+                ),
+                "doc_slug": "aster-product-overview",
+                "expect_reason": "entity_mismatch",
+            },
         ],
     },
 )
