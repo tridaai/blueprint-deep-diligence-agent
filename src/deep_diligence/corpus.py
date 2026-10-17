@@ -378,6 +378,76 @@ CORPUS: tuple[CorpusDoc, ...] = (
         ),
     ),
     # ------------------------------------------------------------------
+    # Verdant Robotics — warehouse automation (dependency case).
+    # The pack built on this corpus declares a workstream chain:
+    # the market read depends on the product read, and the financial
+    # read is independent. Gold facts are placed so each scores for
+    # exactly its own workstream, as everywhere in this corpus.
+    # ------------------------------------------------------------------
+    _doc(
+        slug="verdant-product-overview", company="verdant-robotics",
+        company_name="Verdant Robotics", kind="product",
+        title="Verdant Robotics — Mule-6 Product Overview",
+        source="Vendor product documentation", date="2025-12-05",
+        body=(
+            "Verdant Robotics builds autonomous mobile robots for "
+            "warehouse logistics. The Mule-6 is its flagship platform, "
+            "sold to retail and third-party logistics operators moving "
+            "pallets inside large distribution centres."
+        ),
+        facts=(
+            ("F-VER-101", "The Mule-6 is Verdant's flagship warehouse robot, a system that lifts up to 600 kg per trip.", "q1"),
+            ("F-VER-102", "Verdant has deployed the Mule-6 in 46 warehouses for retail customers.", "q1"),
+            ("F-VER-103", "The Mule-6 carries ISO 3691-4 safety certification for driverless industrial trucks.", "q1"),
+        ),
+    ),
+    _doc(
+        slug="verdant-news-deployment-profile", company="verdant-robotics",
+        company_name="Verdant Robotics", kind="news",
+        title="Verdant's Robots Roll Into Europe",
+        source="Trade press profile", date="2026-01-19",
+        body=(
+            "A trade profile of Verdant's European push followed the "
+            "Mule-6 through its first safety audit on the continent "
+            "and the early deployments that followed it."
+        ),
+        facts=(
+            ("F-VER-104", "Verdant's Mule-6 system passed its first European safety audit in January 2026.", "q1"),
+        ),
+    ),
+    _doc(
+        slug="verdant-market-analysis", company="verdant-robotics",
+        company_name="Verdant Robotics", kind="news",
+        title="Warehouse Automation Market Briefing",
+        source="Industry analyst briefing", date="2026-02-11",
+        body=(
+            "An industry analyst briefing on warehouse automation "
+            "sized the market, ranked the vendors in it, and set out "
+            "where demand is coming from as operators automate."
+        ),
+        facts=(
+            ("F-VER-201", "Analysts estimate Verdant holds about 17% of the warehouse automation market, second in its segment.", "q2"),
+            ("F-VER-202", "Demand from logistics operators expanded the market as adoption of warehouse robotics accelerated.", "q2"),
+            ("F-VER-203", "Verdant's largest competitor holds about 26% of the market.", "q2"),
+        ),
+    ),
+    _doc(
+        slug="verdant-investor-update", company="verdant-robotics",
+        company_name="Verdant Robotics", kind="investor",
+        title="Verdant Robotics — Investor Update Q1 2026",
+        source="Investor update letter", date="2026-03-22",
+        body=(
+            "The quarterly investor letter covers the Series C close, "
+            "the runway it buys the company, and the revenue the "
+            "installed base is now producing."
+        ),
+        facts=(
+            ("F-VER-301", "Verdant raised a $58M Series C funding round in March 2026.", "q3"),
+            ("F-VER-302", "Management guided to 30 months of runway at the current burn rate.", "q3"),
+            ("F-VER-303", "Revenue reached $41M in 2025, with a gross margin of 38%.", "q3"),
+        ),
+    ),
+    # ------------------------------------------------------------------
     # Distractor: a similarly named but different company. Never in
     # scope for a gold case; its facts are nobody's gold.
     # ------------------------------------------------------------------
@@ -557,3 +627,62 @@ ALL_CASES: tuple[dict, ...] = GOLD_CASES + INTEGRITY_CASES
 # records themselves. The promotion gate consumes this map; it never
 # re-decides which cases are held out.
 PACK_SPLITS: dict[str, str] = {case["key"]: case["split"] for case in ALL_CASES}
+
+
+# Dependency cases: packs that grade the shell's scheduling, not a
+# profile, so they sit outside the tuning/held-out split the
+# promotion gate judges on. The brief declares the chain — the
+# market workstream (q2) depends on the product workstream (q1),
+# the financial workstream (q3) is an independent branch — and the
+# grader (evaluation.evaluate_dependency_case) checks the schedule
+# itself: q2's start follows q1's finish in the audit trail, the
+# handoff to q2 carried exactly q1's findings, and recall and
+# citation gates hold.
+#
+# The second pack is the failure-injection variant: the same brief
+# with the financial branch's only document scoped out of the case
+# (allowed_sources is the case's own source scoping). Gold: q1 and
+# q2 complete with their handoff intact, q3's workstream ends
+# empty, its question reads NOT COVERED in the coverage table with
+# the reason named, and the case still reaches DRAFT_READY — one
+# branch's failure is a reported fact, not a failed case.
+_VERDANT_BRIEF = {
+    "subject": "Verdant Robotics",
+    "subject_ref": "verdant-robotics",
+    "analyst": "Eval Harness",
+    "questions": [
+        {"id": "q1", "text": "What is the Mule-6 and where is it deployed: capability, deployments, and certification?", "workstream": "product-scan", "depends_on": []},
+        {"id": "q2", "text": "What is Verdant's market position: share, demand, and competitive standing?", "workstream": "market-scan", "depends_on": ["q1"]},
+        {"id": "q3", "text": "What is Verdant's financial position: funding, runway, and revenue?", "workstream": "financial-scan", "depends_on": []},
+    ],
+    "allowed_sources": [],
+    "budget": {"max_steps": 120, "max_subagents": 6, "max_tokens": 400000, "max_wall_seconds": 600},
+}
+
+DEPENDENCY_CASES: tuple[dict, ...] = (
+    {
+        "key": "dependency-verdant-chain",
+        "brief": _VERDANT_BRIEF,
+        "gold_facts": _gold_facts("verdant-robotics"),
+        "depends": {"q2": ["q1"]},
+        "expect_empty": [],
+    },
+    {
+        "key": "dependency-verdant-missing-branch",
+        "brief": {
+            **_VERDANT_BRIEF,
+            "allowed_sources": [
+                "verdant-product-overview",
+                "verdant-news-deployment-profile",
+                "verdant-market-analysis",
+            ],
+        },
+        "gold_facts": {
+            fact: question
+            for fact, question in _gold_facts("verdant-robotics").items()
+            if question != "q3"
+        },
+        "depends": {"q2": ["q1"]},
+        "expect_empty": ["q3"],
+    },
+)

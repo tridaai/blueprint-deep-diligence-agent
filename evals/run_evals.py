@@ -34,6 +34,17 @@ amendment plus re-run must reach DRAFT_READY with full recall —
 the budget ledger showing grant, exhaustion, amendment, and
 completion in order.
 
+The dependency packs (DEPENDENCY_CASES) grade the workstream
+schedule: a brief declares a chain (the market workstream depends
+on the product workstream; the financial workstream is an
+independent branch), and the gates assert the plan carried the
+declaration, the dependent's start follows its prerequisite's
+finish in the audit trail, the handoff carried exactly the
+prerequisite's findings, and every branch's findings are present.
+The failure-injection variant scopes one branch's only document
+out of the case: that workstream must end empty, its question
+NOT COVERED with the reason named, and the case must still draft.
+
 Exit code 0 only when every gate passes for every case.
 
 Profiles: `--profile <id>` runs the same packs under a different
@@ -67,8 +78,15 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from deep_diligence.budgets import budget_view  # noqa: E402
 from deep_diligence.config import load_settings  # noqa: E402
-from deep_diligence.corpus import GOLD_CASES, INTEGRITY_CASES  # noqa: E402
-from deep_diligence.evaluation import evaluate_case  # noqa: E402
+from deep_diligence.corpus import (  # noqa: E402
+    DEPENDENCY_CASES,
+    GOLD_CASES,
+    INTEGRITY_CASES,
+)
+from deep_diligence.evaluation import (  # noqa: E402
+    evaluate_case,
+    evaluate_dependency_case,
+)
 from deep_diligence.models import BriefIn, BudgetIn  # noqa: E402
 from deep_diligence.profiles import ProfileError, load_profile  # noqa: E402
 from deep_diligence.service import CaseService  # noqa: E402
@@ -349,6 +367,43 @@ def main(argv: list[str] | None = None) -> int:
             f"  missing gold facts after amendment: "
             f"{budget_result['missing_after_amendment']}"
         )
+    # Dependency packs: the brief declares a workstream chain, and
+    # the gates grade the schedule itself — a dependent's start
+    # follows its prerequisites' finishes in the audit trail, the
+    # handoff carried exactly the prerequisites' findings — plus a
+    # failure-injection variant whose missing branch must surface
+    # as an empty workstream and a NOT COVERED row with the reason
+    # named, while the case still drafts.
+    for gold in DEPENDENCY_CASES:
+        result = evaluate_dependency_case(gold, profile_id=args.profile)
+        total_unsupported += len(result["unsupported"])
+        passed = (
+            result["deps_ok"]
+            and result["schedule_ok"]
+            and result["handoff_ok"]
+            and result["status_ok"]
+            and result["coverage_ok"]
+            and result["case_status"] == "DRAFT_READY"
+            and result["recall"] >= RECALL_GATE
+            and result["citation"] == 1.0
+            and not result["unsupported"]
+        )
+        all_pass = all_pass and passed
+        print(
+            f"{result['key']}: recall {result['recall']:.3f} "
+            f"(gate {RECALL_GATE}), citation {result['citation']:.3f} "
+            f"(gate 1.000), schedule "
+            f"{'OK' if result['schedule_ok'] else 'VIOLATED'}, handoff "
+            f"{'OK' if result['handoff_ok'] else 'WRONG'}, statuses "
+            f"{result['statuses']}, case {result['case_status']} "
+            f"-> {'PASS' if passed else 'FAIL'}"
+        )
+        if result["missing"]:
+            print(f"  missing gold facts: {result['missing']}")
+        for detail in result["schedule_detail"] + result["handoff_detail"]:
+            print(f"  {detail}")
+        if result["unsupported"]:
+            print(f"  unsupported detail: {result['unsupported']}")
     print(
         f"unsupported claims in final reports across all packs: "
         f"{total_unsupported} (gate 0)"

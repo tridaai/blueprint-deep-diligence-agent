@@ -241,6 +241,162 @@ def evaluate_case(
     }
 
 
+def evaluate_dependency_case(
+    gold: dict, profile_id: str = "offline-stub", profiles_dir=None
+) -> dict:
+    """Grade one dependency pack (corpus.DEPENDENCY_CASES).
+
+    Beyond the usual recall / citation / unsupported lines, this
+    grades the schedule itself, off the case's own audit trail:
+    each dependent workstream's start must follow its prerequisites'
+    finishes; the handoff recorded for a dependent must carry
+    exactly its prerequisites' finding IDs; every branch's findings
+    must be present; and a branch the pack expects to come back
+    empty (its evidence scoped out) must end with that status, its
+    question NOT COVERED with the reason named in the coverage
+    table, while the case still drafts.
+    """
+    scratch = Path(tempfile.mkdtemp(prefix="deep-diligence-eval-deps-"))
+    settings = load_settings(
+        sqlite_path=str(scratch / "diligence.db"),
+        object_dir=str(scratch / "objects"),
+        migrations_dir=str(REPO_ROOT / "migrations"),
+        profile_id=profile_id,
+        profile_dir=str(profiles_dir) if profiles_dir else None,
+    )
+    service = CaseService(settings)
+    case = service.create_case(BriefIn(**gold["brief"]))
+    case_id = case["case_id"]
+    service.run_planning(case_id)
+    plan = service.store.get_plan(case_id)
+    plan_deps = {
+        ws["question_id"]: list(ws.get("depends_on") or [])
+        for ws in plan["plan"]["workstreams"]
+    }
+    service.decide_plan(case_id, analyst="Eval Harness", approve=True)
+    report = service.run_execution(case_id)
+    case = service.store.get_case(case_id)
+    audit = service.store.list_audit(case_id)
+
+    def first_index(event: str, question_id: str) -> int | None:
+        for i, entry in enumerate(audit):
+            payload = entry.get("payload") or {}
+            if entry["event"] == event and payload.get("question_id") == question_id:
+                return i
+        return None
+
+    schedule_ok = True
+    schedule_detail: list[str] = []
+    for dependent, prerequisites in gold["depends"].items():
+        started = first_index("workstream_started", dependent)
+        if started is None:
+            schedule_ok = False
+            schedule_detail.append(f"{dependent} never started")
+            continue
+        for prerequisite in prerequisites:
+            finished = first_index("workstream_finished", prerequisite)
+            if finished is None or finished > started:
+                schedule_ok = False
+                schedule_detail.append(
+                    f"{dependent} started before {prerequisite} finished"
+                )
+    findings = service.store.list_findings(case_id)
+    finding_ids_by_question: dict[str, set[str]] = {}
+    for finding in findings:
+        finding_ids_by_question.setdefault(finding["question_id"], set()).add(
+            finding["finding_id"]
+        )
+    handoffs = {
+        (entry.get("payload") or {}).get("question_id"): (
+            entry.get("payload") or {}
+        ).get("finding_ids", [])
+        for entry in audit
+        if entry["event"] == "workstream_handoff"
+    }
+    handoff_ok = True
+    handoff_detail: list[str] = []
+    for dependent, prerequisites in gold["depends"].items():
+        expected: set[str] = set()
+        for prerequisite in prerequisites:
+            expected |= finding_ids_by_question.get(prerequisite, set())
+        recorded = set(handoffs.get(dependent, []))
+        if recorded != expected:
+            handoff_ok = False
+            handoff_detail.append(
+                f"{dependent}: handoff carried {sorted(recorded)}, "
+                f"expected exactly {sorted(expected)}"
+            )
+    statuses = {
+        s["question_id"]: s["status"] for s in report.get("workstreams", [])
+    }
+    expected_empty = set(gold.get("expect_empty", []))
+    status_ok = all(
+        statuses.get(qid) == "empty" for qid in expected_empty
+    ) and all(
+        statuses.get(q["id"]) == "completed"
+        for q in gold["brief"]["questions"]
+        if q["id"] not in expected_empty
+    )
+    coverage = {
+        row["question_id"]: row for row in report.get("coverage_detail") or []
+    }
+    coverage_ok = True
+    for qid in expected_empty:
+        row = coverage.get(qid)
+        if (
+            row is None
+            or row["status"] != "NOT COVERED"
+            or not row.get("reason")
+            or qid not in report["markdown"]
+            or (row.get("reason") or "") not in report["markdown"]
+        ):
+            coverage_ok = False
+    found = {
+        f["fact_ref"] for f in findings if f.get("fact_ref")
+    }
+    gold_facts = set(gold["gold_facts"])
+    recall = len(found & gold_facts) / len(gold_facts) if gold_facts else 1.0
+    claims = report["claims"]
+    cited = [c for c in claims if c["evidence_ids"]]
+    citation = len(cited) / len(claims) if claims else 1.0
+    evidence_by_id = {
+        ev["evidence_id"]: ev for ev in service.store.list_evidence(case_id)
+    }
+    unsupported: list[dict] = []
+    for claim in claims:
+        texts = [
+            evidence_text(service.objects, evidence_by_id[eid])
+            for eid in claim["evidence_ids"]
+            if eid in evidence_by_id
+        ]
+        failures = check_claim(claim["claim"], texts)
+        if failures:
+            unsupported.append(
+                {"claim_id": claim.get("claim_id"), "failures": failures}
+            )
+    return {
+        "key": gold["key"],
+        "profile": service.profile.record(),
+        "plan_deps": plan_deps,
+        "deps_ok": plan_deps
+        == {**{q["id"]: [] for q in gold["brief"]["questions"]}, **gold["depends"]},
+        "schedule_ok": schedule_ok,
+        "schedule_detail": schedule_detail,
+        "handoff_ok": handoff_ok,
+        "handoff_detail": handoff_detail,
+        "statuses": statuses,
+        "status_ok": status_ok,
+        "coverage_ok": coverage_ok,
+        "case_status": case["status"],
+        "recall": recall,
+        "found": len(found & gold_facts),
+        "gold": len(gold_facts),
+        "missing": sorted(gold_facts - found),
+        "citation": citation,
+        "unsupported": unsupported,
+    }
+
+
 def evaluate_suite(profile_id: str, profiles_dir=None) -> dict:
     """One full pass over every pack under one profile.
 
