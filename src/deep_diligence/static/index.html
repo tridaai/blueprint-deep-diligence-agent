@@ -129,13 +129,15 @@ async function openCase(caseId) {
   const budget = await api(`/api/cases/${caseId}/budget`);
   const usage = (budget.usage && budget.usage.execution) || {};
   const planUsage = (budget.usage && budget.usage.planning) || {};
-  const [plan, findings, evidence, audit, report, ledger] = await Promise.all([
+  const [plan, findings, evidence, audit, report, ledger, verification, quarantine] = await Promise.all([
     api(`/api/cases/${caseId}/plan`).catch(() => null),
     api(`/api/cases/${caseId}/findings`),
     api(`/api/cases/${caseId}/evidence`),
     api(`/api/cases/${caseId}/audit`),
     api(`/api/cases/${caseId}/report`).catch(() => null),
     api(`/api/cases/${caseId}/ledger`).catch(() => null),
+    api(`/api/cases/${caseId}/verification`).catch(() => null),
+    api(`/api/cases/${caseId}/quarantine`).catch(() => []),
   ]);
   const driftIds = new Set(((ledger && ledger.verification && ledger.verification.drift) || []).map(d => d.evidence_id));
   const canPlan = ["INTAKE", "PLAN_REJECTED"].includes(c.status);
@@ -191,6 +193,25 @@ async function openCase(caseId) {
         ${ledger.entries.flatMap(e => e.citations.map(cit => `<tr><td>${esc(e.claim_id)}</td><td>${esc(e.finding_id)}</td><td>${esc(e.claim)}</td><td><a class="ev" data-ev="${cit.evidence_id}">[${cit.evidence_id}]</a></td><td>${esc(cit.sha256.slice(0, 12))}…</td><td>${driftIds.has(cit.evidence_id) ? '<span style="color:#B42318;font-weight:700">DRIFT</span>' : "verified"}</td></tr>`)).join("")}
         </table>` : '<p class="muted">No ledger yet — it is built when a report is composed.</p>'}
     </div>
+    <div class="panel" style="margin-top:16px"><h3>Verifier ${verification ? `(${verification.checked} checked · ${verification.supported} supported · ${verification.quarantined} quarantined · ${esc(verification.mode)}${verification.model ? " · " + esc(verification.model) : ""})` : ""}</h3>
+      ${verification ? `<p class="muted" style="margin-top:0">Independent pass, run after composition and before the report gate: every claim re-read against the evidence bytes it cites. Deterministic checks decide quarantine; a model check, when configured, is advisory only.</p>
+      ${verification.checks.length ? `<table><tr><th>Claim</th><th>Verdict</th><th>Reasons</th><th>Model check</th></tr>
+        ${verification.checks.map(ch => `<tr><td>${esc(ch.claim_id)}</td><td>${ch.verdict === "quarantined" ? '<span style="color:#B42318;font-weight:700">QUARANTINED</span>' : "supported"}</td><td>${esc(ch.reasons.join(", ") || "—")}</td><td>${esc(ch.model_check || "not run")}</td></tr>`).join("")}
+        </table>` : '<p class="muted">No claims checked yet.</p>'}` : '<p class="muted">No verification yet — it runs when a report is composed.</p>'}
+    </div>
+    <div class="panel" style="margin-top:16px"><h3>Quarantine (${quarantine.length})</h3>
+      ${quarantine.length ? quarantine.map(q => `
+        <div class="finding">
+          <strong style="color:#B42318">${esc(q.reason)}</strong> · <span class="status">${esc(q.status)}</span><br>
+          ${esc(q.claim)} ${q.evidence_ids.map(e => `<a class="ev" data-ev="${e}">[${e}]</a>`).join(" ")}
+          <div class="muted">${q.failures.map(f => esc(f.detail)).join(" · ")}</div>
+          ${q.decided_by ? `<div class="muted">${esc(q.status)} by ${esc(q.decided_by)}${q.decision_note ? " — " + esc(q.decision_note) : ""}</div>` : ""}
+          ${q.status === "QUARANTINED" ? `<div class="row">
+            <button class="secondary" data-qback="${esc(q.quarantine_id)}" ${canDecideReport ? "" : "disabled"}>Send back for re-investigation</button>
+            <button class="danger" data-qdrop="${esc(q.quarantine_id)}" ${canDecideReport ? "" : "disabled"}>Drop claim</button>
+          </div>` : ""}
+        </div>`).join("") : '<p class="muted">Nothing quarantined. A claim lands here when the verifier finds its cited evidence does not support it; it can be sent back or dropped, never approved into the report.</p>'}
+    </div>
     <div class="panel" style="margin-top:16px"><h3>Audit trail (${audit.length})</h3>
       <table><tr><th>Time</th><th>Event</th><th>Detail</th></tr>
       ${audit.map(a => `<tr><td>${esc(a.ts)}</td><td>${esc(a.event)}</td><td>${esc(JSON.stringify(a.payload))}</td></tr>`).join("")}
@@ -203,6 +224,15 @@ async function openCase(caseId) {
   act("#act-exec", () => api(`/api/cases/${caseId}/execute`, {method: "POST"}));
   act("#act-report-ok", () => api(`/api/cases/${caseId}/report/decision`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({analyst: "Console Analyst", approve: true, note: ""})}));
   act("#act-report-no", () => api(`/api/cases/${caseId}/report/decision`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({analyst: "Console Analyst", approve: false, note: "Sent back from the console"})}));
+  const qact = (attr, action) => document.querySelectorAll(`[data-${attr}]`).forEach(el => el.addEventListener("click", async () => {
+    el.disabled = true;
+    try {
+      await api(`/api/cases/${caseId}/quarantine/${el.dataset[attr]}/decision`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({analyst: "Console Analyst", action, note: action === "reinvestigate" ? "Sent back from the console" : "Dropped from the console"})});
+    } catch (e) { alert(e.message); }
+    await refreshCases(); await openCase(caseId);
+  }));
+  qact("qback", "reinvestigate");
+  qact("qdrop", "drop");
   document.querySelectorAll("a.ev").forEach(a => a.addEventListener("click", async () => {
     const ev = await api(`/api/cases/${caseId}/evidence/${a.dataset.ev}`);
     $("#ev-view").innerHTML = `<h3 style="margin-top:14px">[${esc(ev.evidence_id)}] ${esc(ev.title)}</h3><pre class="plain">${esc(ev.text)}</pre>`;

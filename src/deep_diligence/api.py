@@ -18,7 +18,7 @@ from .corpus import GOLD_CASES, companies
 from .evidence import evidence_text
 from .ledger import verify_ledger
 from .logging_setup import configure_logging, new_request_id
-from .models import BriefIn, CaseOut, DecisionIn
+from .models import BriefIn, CaseOut, DecisionIn, QuarantineDecisionIn
 from .service import CaseService, GateError
 
 log = logging.getLogger("deep_diligence.api")
@@ -171,6 +171,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if report is None:
             raise HTTPException(status_code=404, detail="no report yet")
         return report
+
+    @app.get("/api/cases/{case_id}/verification")
+    def get_verification(case_id: str) -> dict:
+        get_case_or_404(case_id)
+        result = service.store.get_verifier_report(case_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail="no verification yet")
+        return result
+
+    @app.get("/api/cases/{case_id}/quarantine")
+    def list_quarantine(case_id: str) -> list[dict]:
+        get_case_or_404(case_id)
+        return service.store.list_quarantine(case_id)
+
+    @app.post(
+        "/api/cases/{case_id}/quarantine/{quarantine_id}/decision",
+        dependencies=[Depends(require_api_key)],
+    )
+    def decide_quarantine(
+        case_id: str, quarantine_id: str, decision: QuarantineDecisionIn
+    ) -> dict:
+        get_case_or_404(case_id)
+        try:
+            record = service.decide_quarantine(
+                case_id,
+                quarantine_id,
+                decision.analyst,
+                decision.action,
+                decision.note,
+            )
+        except KeyError:
+            raise HTTPException(
+                status_code=404, detail="quarantine record not found"
+            ) from None
+        except GateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        case = service.store.get_case(case_id)
+        return {"quarantine": record, "case_status": case["status"]}
 
     @app.post("/api/cases/{case_id}/report/decision", dependencies=[Depends(require_api_key)])
     def decide_report(case_id: str, decision: DecisionIn) -> dict:

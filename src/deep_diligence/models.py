@@ -59,6 +59,14 @@ class DecisionIn(BaseModel):
     note: str = Field(default="", max_length=2000)
 
 
+class QuarantineDecisionIn(BaseModel):
+    analyst: str = Field(min_length=1, max_length=120)
+    # A quarantined claim has exactly two analyst moves; there is no
+    # "approve into the report" action, by design.
+    action: Literal["reinvestigate", "drop"]
+    note: str = Field(default="", max_length=2000)
+
+
 class CaseOut(BaseModel):
     case_id: str
     status: str
