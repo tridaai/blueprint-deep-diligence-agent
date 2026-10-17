@@ -59,7 +59,10 @@ cp .env.example .env   # then set ONE provider
   labelled deterministic stub model drives the same harness over the
   bundled corpus. That is what the tests, the evals, and the demo run.
 
-Real-provider packages are an extra: `uv sync --extra llm`.
+Real-provider packages are an extra: `uv sync --extra llm`. Pair the
+provider with the harness profile tuned for it — `PROFILE_ID` (see
+"Harness profiles" below); the default `offline-stub` profile is the
+build the tests and evals pin.
 
 ## Quickstart (offline, no keys)
 
@@ -173,6 +176,27 @@ is accountable for lives in our code around it:
   the fact: the report is flagged **EVIDENCE_DRIFT** and cannot be
   approved until the ledger re-verifies clean. Rejection at either
   gate is a normal state, with the analyst's note kept on the record.
+- **Harness profiles.** How the harness is built for a model —
+  which prompt sections are assembled for the planner and each
+  sub-agent, which case tools each role may use, which sub-agents
+  exist, and the middleware switches (context compression,
+  large-result offloading) — is a versioned configuration artifact
+  in `profiles/`, not code. `PROFILE_ID` selects the active profile
+  (default `offline-stub`); the service loads and strictly
+  validates it at startup, and an invalid profile refuses startup
+  with a named error. Switching profiles needs no code change.
+  Every case is stamped with the profile id + version that ran its
+  planning and execution, in the case record, the console, and the
+  audit trail. Two profiles ship: `offline-stub` (the behaviour the
+  gates pin) and `openai-gpt`, a candidate tuning for the
+  OpenAI-compatible frontier profile with model-tuned prompt
+  suffixes, context compression off and large-result offloading on,
+  and a market-scan narrowed to search results only. A profile
+  changes harness configuration only — never model weights, and
+  never the governance: gates, budgets, and citation rules hold
+  under every profile. The model itself is injected separately, so
+  a profile can be run and evaluated with the offline stub standing
+  in for its target.
 - **Audit trail.** Case creation, evidence ingestion, plan versions
   and decisions, every sub-agent spawn, budget events, composition,
   and report decisions are recorded per case and visible in the
@@ -225,11 +249,23 @@ preliminary release) — and no other conflicts. The budget case
 exhausts on its step cap during execution, refuses a
 below-consumption amendment, and after amendment re-runs to
 DRAFT_READY with recall **1.000**. The pytest suite
-(67 tests) covers the gates, the budget caps, the evidence backend,
+(93 tests) covers the gates, the budget caps, the evidence backend,
 the citation rules, the ledger's drift gate, the verifier and
 quarantine, conflict detection and handling, per-phase budgets,
-the budget ledger, the partial-report protocol, and amendment
-separately.
+the budget ledger, the partial-report protocol, amendment, and
+the harness profiles separately.
+
+The eval runner also runs the packs under any other profile —
+`python evals/run_evals.py --profile openai-gpt` — with the report
+header naming the profile and version, so results are attributable
+per profile. The default profile is the gate; another profile's run
+is reported, not gated. Under `openai-gpt` with the stub standing
+in, the gold packs score recall **0.700–0.769**: its narrowed
+market-scan has no document reader, so the market questions come
+back empty — the cost of that tuning choice, in its own column,
+while citation completeness and the zero-unsupported-claims line
+hold. (The citation-integrity pack, whose questions are financial
+and product, still scores 1.000.)
 
 ## Production profile
 
@@ -255,8 +291,13 @@ development profile needs none of it: SQLite at `./data/diligence.db`
   records, but detection is only as wide as the governed metric
   lexicon in `conflicts.py`: a disagreement stated without a
   recognised metric, figure, or comparable value will sit in the
-  report as two findings and not be flagged. Harness-profile
-  promotion is a later round. The verifier checks
+  report as two findings and not be flagged. Harness profiles are
+  live as configuration, but *promoting* one — letting a tuned
+  profile replace the default on eval evidence, held-out cases
+  included — is a later round; nothing here auto-promotes. A
+  profile's tool allowlist governs this blueprint's case tools; the
+  harness's built-in filesystem tools are its own scaffolding and
+  are not a profile's to grant or withhold. The verifier checks
   figures, dates, and named entities against cited text — it does
   not judge narrative plausibility, and its optional model check is
   advisory only.
@@ -271,7 +312,9 @@ development profile needs none of it: SQLite at `./data/diligence.db`
 src/deep_diligence/
   api.py          FastAPI surface + console routes
   service.py      case lifecycle, plan/report gates
-  harness.py      create_deep_agent wiring, prompts, sub-agent roster
+  harness.py      create_deep_agent wiring, built from the profile
+  profiles.py     harness profiles: the strict loader, prompt
+                  assembly, and the middleware the switches control
   stub_model.py   the deterministic offline model
   llm.py          provider boundary (OpenAI-compatible, Anthropic, Ollama)
   budgets.py      budget guard enforced in code around the harness
@@ -292,8 +335,10 @@ src/deep_diligence/
   store.py        case store port (SQLite local, PostgreSQL production)
   objects.py      object-store port (local directory, S3-compatible)
   static/         the console (one static HTML file)
+profiles/         the harness profile artifacts (offline-stub,
+                  openai-gpt), versioned JSON, strictly validated
 migrations/       numbered SQL migrations (+ sqlite/ variants)
-evals/            the gold case-pack gate
+evals/            the gold case-pack gate (--profile for per-profile runs)
 tests/            the pytest suite
 docs/             architecture notes
 ```

@@ -22,8 +22,9 @@ it, so they hold for any model the harness runs.
 |---|---|---|
 | API | `api.py` | FastAPI surface + console; gates surface as 409 |
 | Service | `service.py` | Case lifecycle state machine; the plan/report gates |
-| Harness wiring | `harness.py` | `create_deep_agent` with planner + 3 workstream sub-agents |
-| Prompts | `harness.py` | Planner and workstream system prompts (phase/workstream markers) |
+| Harness wiring | `harness.py` | `create_deep_agent` built from the active profile: assembled prompts, per-role tools, the profile's roster |
+| Prompts | `harness.py`, `profiles/` | Canonical prompt texts in `harness.py`; the shipped offline profile mirrors them section for section (a test pins the two together) |
+| Profiles | `profiles.py`, `profiles/*.json` | Harness profile artifacts: strict fail-closed loader, prompt assembly from named sections, middleware the switches control |
 | Budgets | `budgets.py` | Callback guard + budget ledger: per-phase step/token caps, case-level spawn/wall caps, grant/consume/exhaust/amend entries folded from the audit trail |
 | Tools | `tools.py` | `search_corpus`, `read_document`, `record_finding` (citation rule) |
 | Backend | `backend.py` | Deep Agents filesystem protocol over the evidence store |
@@ -198,17 +199,19 @@ Payload-JSON tables, Postgres and SQLite variants of the same schema
 (numbered migrations in `migrations/` and `migrations/sqlite/`):
 `cases`, `plans` (versioned), `evidence`, `findings`, `reports`,
 `citation_ledger`, `verifier_reports`, `quarantine`, `conflicts`,
-`case_files`, `audit`. The audit trail records case creation,
-evidence ingestion, plan generation and decisions, sub-agent spawns,
-budget ledger entries (grants, consumption checkpoints,
-exhaustions, amendments), composition, verification and quarantine
-events, conflict detections and NOTED decisions, evidence-drift
-detections, and report decisions.
+`case_files`, `audit`. Case records carry the active harness
+profile's stamp (id, version, target model) from intake. The audit
+trail records case creation, evidence ingestion, plan generation
+and decisions, sub-agent spawns, budget ledger entries (grants —
+each naming the profile the phase ran under — consumption
+checkpoints, exhaustions, amendments), composition, verification
+and quarantine events, conflict detections and NOTED decisions,
+evidence-drift detections, and report decisions.
 
 ## Models
 
 One boundary (`llm.py`): `offline` returns the scripted stub; the
-real-provider profiles build `ChatOpenAI` (any OpenAI-compatible
+real-provider backends build `ChatOpenAI` (any OpenAI-compatible
 endpoint, including NVIDIA NIM and Ollama's compatible surface) or
 `ChatAnthropic` from the `llm` extra. Prompts are written for real
 models; the stub keys its deterministic playbook off the same phase
@@ -216,8 +219,86 @@ and workstream markers, and reads facts from the corpus documents'
 Key facts ledgers. LangSmith is not required anywhere — tracing is
 the audit trail plus structured JSON logs with request IDs.
 
+## Harness profiles
+
+A harness profile is a versioned JSON artifact in `profiles/`
+holding, for one target model: the prompt sections and the order
+they assemble in (planner sections, and per sub-agent a section
+list whose text may carry the `{workstream}` placeholder), a
+roster of sub-agents (name, description, prompt sections, and a
+tool allowlist over the blueprint's case-tool registry), and the
+middleware switches (`context_compression`,
+`large_result_offloading`, `offload_threshold_chars`).
+
+**Selection and recording.** `PROFILE_ID` (default `offline-stub`)
+names the active artifact; the service loads it once at startup
+and stamps its id + version + target onto every case record, onto
+the `case_created` audit entry, and onto each phase's
+`budget_granted` entry — planning and execution are both attributed
+to the profile that ran them, in the case view, the console, and
+the audit trail. Switching profiles is a configuration change; the
+model is injected separately by `llm.py`, so any profile can be
+exercised with the stub model standing in for its target.
+
+**Fail-closed validation.** The loader rejects, with a named
+`ProfileError` per problem: unknown keys at any level, missing
+required keys, a planner or roster entry referencing a prompt
+section that is not defined, a roster entry naming no section at
+all, a tool name outside the case-tool registry, a middleware
+switch left unset, a duplicate roster name, an id that does not
+match its file name, and a file that is not valid JSON. The service
+constructs nothing until its profile has loaded — a bad profile is
+a refused startup, never a silent fallback to defaults.
+
+**How the switches act.** Prompts, tool lists, and the roster are
+passed straight to `create_deep_agent`, so their effect is the
+build itself. The middleware switches work through the caller
+middleware the harness merges into its stack by name. Context
+compression off passes a pass-through middleware named
+`SummarizationMiddleware`, which takes the built-in compression
+middleware's slot in place — the assembled stack carries no
+compression. Large-result offloading on adds this blueprint's own
+middleware: a tool result over the profile's threshold is written
+in full to `/offloaded/` in the case filesystem and the model sees
+a pointer plus a preview. Under the offline profile's switches
+(compression on, offloading off) the contributed middleware list is
+empty — the default build is unchanged.
+
+**Two profiles ship.** `offline-stub` v1 reproduces the
+pre-profile build byte-for-byte (its sections are the canonical
+prompts in `harness.py`; a test pins them equal). `openai-gpt` v1
+targets `openai:gpt-5.1`: model-tuned suffix sections on the
+planner and workstreams, context compression off with offloading
+on (threshold 20,000 chars), and a market-scan whose allowlist
+drops `read_document` — it works from search results only. Run
+under the eval packs with the stub standing in, its gold-pack
+recall falls to 0.700–0.769 while citation discipline holds: the
+tuning's cost, attributed to the profile that caused it. Whether
+such a profile may replace the default is a promotion decision
+bound to the eval gate — a later round; this round only builds the
+artifacts, the loader, the recording, and the per-profile runs
+(`evals/run_evals.py --profile <id>`).
+
+**Why not the package's own profiles.** `deepagents` resolves its
+internal `HarnessProfile` from the model's identity through a
+process-global, additive registry. That cannot express this
+blueprint's selection rule — the profile named in configuration
+runs the build, whatever model is injected — and a global registry
+would let one service's tuning leak into another's. The blueprint
+therefore keeps its own artifacts and applies them through the
+public seams above.
+
 ## Deliberate limits of this round
 
+- Harness profiles shape this blueprint's own seams — prompts,
+  case-tool allowlists, the roster, caller middleware. The
+  harness's built-in filesystem tools are required scaffolding in
+  `deepagents` and are not a profile's to grant or withhold;
+  likewise the middleware switches act on the assembled stacks
+  through the caller-middleware merge, not on the package's
+  internal per-model profile registry, which this blueprint
+  deliberately does not use. Profile *promotion* (eval-bound,
+  held-out cases, snapshot and rollback) is a later round.
 - Conflict detection is only as wide as the governed metric
   lexicon: a disagreement stated without a recognised metric,
   figure, or comparable value sits in the report as two findings and
