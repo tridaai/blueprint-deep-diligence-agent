@@ -5,8 +5,11 @@ stub model over the bundled corpus and grades it the way the eval
 gate (evals/run_evals.py) always has: finding recall against the
 planted gold facts, citation completeness and correctness on the
 composed claims, the verifier's quarantine of any poisoned findings,
-the conflict gate on planted contradictions, and zero unsupported
-claims in the final report. `evaluate_suite` runs every pack once
+the conflict gate on planted contradictions, zero unsupported
+claims in the final report, summary integrity (every figure, date,
+and entity in the executive summary re-checked against the
+supported claims), and cross-format identity (every claim present
+in both the markdown and the HTML rendering). `evaluate_suite` runs every pack once
 and returns per-case results plus the slim per-case metrics the
 profile regression gate (promotion.py) consumes.
 
@@ -17,6 +20,7 @@ second, softer grading path for promotion decisions.
 
 from __future__ import annotations
 
+import html as _html
 import re
 import tempfile
 from pathlib import Path
@@ -205,6 +209,29 @@ def evaluate_case(
     conflicts_ok = all(c["ok"] for c in conflict_results) and len(
         conflict_records
     ) == len(gold.get("contradictions", []))
+    # Summary integrity (R11): every figure, date, and named entity
+    # in the executive summary must appear in a supported claim —
+    # re-checked here with the verifier's own extraction,
+    # independently of the composition-time check that drops failing
+    # sentences. Zero violations are tolerated on any pack.
+    model = report.get("model") or {}
+    summary_sentences = (model.get("executive_summary") or {}).get(
+        "sentences", []
+    )
+    summary_violations = sum(
+        1 for s in summary_sentences if check_claim(s, report_claim_texts)
+    )
+    # Cross-format identity (R11): the markdown and the HTML render
+    # the same model, so every claim must appear in both renderings
+    # (HTML-escaped in the HTML).
+    html_text = report.get("html") or ""
+    claims_in_markdown = all(
+        c["claim"] in report["markdown"] for c in report["claims"]
+    )
+    claims_in_html = all(
+        _html.escape(c["claim"], quote=True) in html_text
+        for c in report["claims"]
+    )
     verifier_report = service.store.get_verifier_report(case_id) or {}
     usage = case["usage"].get("execution", {})
     budget = gold["brief"]["budget"]
@@ -236,6 +263,10 @@ def evaluate_case(
             "supported": verifier_report.get("supported"),
             "quarantined": verifier_report.get("quarantined"),
         },
+        "summary_sentences": len(summary_sentences),
+        "summary_violations": summary_violations,
+        "claims_in_markdown": claims_in_markdown,
+        "claims_in_html": claims_in_html,
         "budget_compliant": compliant,
         "usage": usage,
     }

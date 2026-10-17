@@ -19,6 +19,13 @@ execution — which the independent verifier must quarantine with the
 expected reasons. Across every pack, the final reports are re-checked
 claim by claim: unsupported claims in final reports must be 0.
 
+Every pack is also graded on summary integrity: the executive
+summary is composed from the supported claims alone, and every
+figure, date, and named entity it states must appear in one — zero
+violations are tolerated. And the report's formats are graded for
+identity: every claim in the report model must appear in both the
+markdown and the HTML rendering.
+
 Every pack also plants contradictions between documents, and the
 conflict gate grades them: each planted pair must yield exactly one
 conflict record carrying both gold values, and the pack must yield
@@ -265,6 +272,9 @@ def main(argv: list[str] | None = None) -> int:
             and result["conflicts_ok"]
             and not result["unsupported"]
             and result["budget_compliant"]
+            and result["summary_violations"] == 0
+            and result["claims_in_markdown"]
+            and result["claims_in_html"]
         )
         all_pass = all_pass and passed
         print(
@@ -314,6 +324,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         if result["unsupported"]:
             print(f"  unsupported detail: {result['unsupported']}")
+        print(
+            f"  summary integrity: {result['summary_sentences']} "
+            f"sentence(s), {result['summary_violations']} violation(s) "
+            f"(gate 0); claims in markdown "
+            f"{'OK' if result['claims_in_markdown'] else 'FAILED'}, "
+            f"claims in HTML "
+            f"{'OK' if result['claims_in_html'] else 'FAILED'}"
+        )
         print(f"  execution usage: {result['usage']}")
     for split in ("tuning", "held_out"):
         subset = [r for r in results if r["split"] == split]
