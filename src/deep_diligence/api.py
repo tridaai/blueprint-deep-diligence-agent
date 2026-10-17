@@ -18,7 +18,7 @@ from .corpus import GOLD_CASES, companies
 from .evidence import evidence_text
 from .ledger import verify_ledger
 from .logging_setup import configure_logging, new_request_id
-from .models import BriefIn, CaseOut, DecisionIn, QuarantineDecisionIn
+from .models import BriefIn, CaseOut, ConflictNoteIn, DecisionIn, QuarantineDecisionIn
 from .service import CaseService, GateError
 
 log = logging.getLogger("deep_diligence.api")
@@ -209,6 +209,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         case = service.store.get_case(case_id)
         return {"quarantine": record, "case_status": case["status"]}
+
+    @app.get("/api/cases/{case_id}/conflicts")
+    def list_conflicts(case_id: str) -> list[dict]:
+        get_case_or_404(case_id)
+        return service.store.list_conflicts(case_id)
+
+    @app.post(
+        "/api/cases/{case_id}/conflicts/{conflict_id}/decision",
+        dependencies=[Depends(require_api_key)],
+    )
+    def decide_conflict(
+        case_id: str, conflict_id: str, decision: ConflictNoteIn
+    ) -> dict:
+        get_case_or_404(case_id)
+        try:
+            record = service.decide_conflict(
+                case_id,
+                conflict_id,
+                decision.analyst,
+                decision.note,
+            )
+        except KeyError:
+            raise HTTPException(
+                status_code=404, detail="conflict record not found"
+            ) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except GateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        case = service.store.get_case(case_id)
+        return {"conflict": record, "case_status": case["status"]}
 
     @app.post("/api/cases/{case_id}/report/decision", dependencies=[Depends(require_api_key)])
     def decide_report(case_id: str, decision: DecisionIn) -> dict:

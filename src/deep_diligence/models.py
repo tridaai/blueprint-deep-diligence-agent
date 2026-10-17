@@ -59,6 +59,14 @@ class DecisionIn(BaseModel):
     note: str = Field(default="", max_length=2000)
 
 
+class ConflictNoteIn(BaseModel):
+    analyst: str = Field(min_length=1, max_length=120)
+    # Marking a conflict NOTED is the analyst's only move on it —
+    # there is no resolve or delete — and it requires the note that
+    # says what the analyst made of the disagreement.
+    note: str = Field(min_length=1, max_length=2000)
+
+
 class QuarantineDecisionIn(BaseModel):
     analyst: str = Field(min_length=1, max_length=120)
     # A quarantined claim has exactly two analyst moves; there is no

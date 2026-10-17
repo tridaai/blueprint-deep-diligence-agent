@@ -129,7 +129,7 @@ async function openCase(caseId) {
   const budget = await api(`/api/cases/${caseId}/budget`);
   const usage = (budget.usage && budget.usage.execution) || {};
   const planUsage = (budget.usage && budget.usage.planning) || {};
-  const [plan, findings, evidence, audit, report, ledger, verification, quarantine] = await Promise.all([
+  const [plan, findings, evidence, audit, report, ledger, verification, quarantine, conflicts] = await Promise.all([
     api(`/api/cases/${caseId}/plan`).catch(() => null),
     api(`/api/cases/${caseId}/findings`),
     api(`/api/cases/${caseId}/evidence`),
@@ -138,6 +138,7 @@ async function openCase(caseId) {
     api(`/api/cases/${caseId}/ledger`).catch(() => null),
     api(`/api/cases/${caseId}/verification`).catch(() => null),
     api(`/api/cases/${caseId}/quarantine`).catch(() => []),
+    api(`/api/cases/${caseId}/conflicts`).catch(() => []),
   ]);
   const driftIds = new Set(((ledger && ledger.verification && ledger.verification.drift) || []).map(d => d.evidence_id));
   const canPlan = ["INTAKE", "PLAN_REJECTED"].includes(c.status);
@@ -212,6 +213,24 @@ async function openCase(caseId) {
           </div>` : ""}
         </div>`).join("") : '<p class="muted">Nothing quarantined. A claim lands here when the verifier finds its cited evidence does not support it; it can be sent back or dropped, never approved into the report.</p>'}
     </div>
+    <div class="panel" style="margin-top:16px"><h3>Conflicts (${conflicts.length})</h3>
+      <p class="muted" style="margin-top:0">Where supported findings assert different values for the same metric and period, both sides stand — labelled by source class, with the later-dated source marked more recent. The desk takes no position on which value is correct; the analyst's only move is to mark a conflict NOTED, and the record stays in the report permanently.</p>
+      ${conflicts.length ? conflicts.map(cf => `
+        <div class="finding">
+          <strong>${esc(cf.conflict_id)} — ${esc(cf.key.metric)} · ${esc(cf.key.period || "no period stated")} · ${esc(cf.key.entity)}</strong> · <span class="status">${esc(cf.status)}</span>
+          ${cf.sides.map(side => `
+            <div style="margin-top:6px"><strong>${esc(side.value_text)}</strong>
+              ${side.claims.map(m => `<div>${esc(m.claim_id)}: ${esc(m.claim)} ${m.evidence_ids.map(e => `<a class="ev" data-ev="${e}">[${e}]</a>`).join(" ")}
+                ${m.sources.map(s => `<div class="muted">Source: ${esc(s.source)}, dated ${esc(s.doc_date)} · ${esc(s.source_class)} source${m.more_recent ? " · more recent" : ""}</div>`).join("")}
+              </div>`).join("")}
+            </div>`).join("")}
+          ${cf.status === "NOTED" ? `<div class="muted" style="margin-top:6px">NOTED by ${esc(cf.noted_by)} — "${esc(cf.note)}"</div>` : ""}
+          ${cf.status === "OPEN" ? `<div class="row">
+            <input id="cnote-${esc(cf.conflict_id)}" type="text" placeholder="Analyst note (required)" style="flex:1">
+            <button class="secondary" data-cnote="${esc(cf.conflict_id)}" ${canDecideReport ? "" : "disabled"}>Mark NOTED</button>
+          </div>` : ""}
+        </div>`).join("") : '<p class="muted">No conflicts. A conflict appears when two supported findings disagree on the same metric for the same period; corroboration — the same value from two sources — is not a conflict.</p>'}
+    </div>
     <div class="panel" style="margin-top:16px"><h3>Audit trail (${audit.length})</h3>
       <table><tr><th>Time</th><th>Event</th><th>Detail</th></tr>
       ${audit.map(a => `<tr><td>${esc(a.ts)}</td><td>${esc(a.event)}</td><td>${esc(JSON.stringify(a.payload))}</td></tr>`).join("")}
@@ -233,6 +252,16 @@ async function openCase(caseId) {
   }));
   qact("qback", "reinvestigate");
   qact("qdrop", "drop");
+  document.querySelectorAll("[data-cnote]").forEach(el => el.addEventListener("click", async () => {
+    const input = document.getElementById(`cnote-${el.dataset.cnote}`);
+    const note = input ? input.value.trim() : "";
+    if (!note) { alert("Marking a conflict NOTED requires a note."); return; }
+    el.disabled = true;
+    try {
+      await api(`/api/cases/${caseId}/conflicts/${el.dataset.cnote}/decision`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({analyst: "Console Analyst", note})});
+    } catch (e) { alert(e.message); }
+    await refreshCases(); await openCase(caseId);
+  }));
   document.querySelectorAll("a.ev").forEach(a => a.addEventListener("click", async () => {
     const ev = await api(`/api/cases/${caseId}/evidence/${a.dataset.ev}`);
     $("#ev-view").innerHTML = `<h3 style="margin-top:14px">[${esc(ev.evidence_id)}] ${esc(ev.title)}</h3><pre class="plain">${esc(ev.text)}</pre>`;
