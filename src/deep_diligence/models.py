@@ -14,6 +14,7 @@ STATUSES = (
     "INTAKE",            # created, no plan yet
     "PLAN_READY",        # plan artifact stored, awaiting the analyst
     "PLAN_REJECTED",     # analyst sent the plan back; may re-plan
+    "APPROVED",          # plan approved; execution may start
     "EXECUTING",         # run in flight (transient inside one request)
     "DRAFT_READY",       # report draft composed, awaiting the analyst
     "BUDGET_EXHAUSTED",  # run stopped on a cap; partial draft composed

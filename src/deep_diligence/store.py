@@ -68,9 +68,22 @@ class Store:
         except Exception:
             return False
 
+    def _migrations_folder(self) -> Path:
+        # MIGRATIONS_DIR wins; otherwise fall back to the migrations
+        # directory beside the package (repo root / migrations), so the
+        # app works from any working directory.
+        bases = [
+            Path(self.settings.migrations_dir),
+            Path(__file__).resolve().parents[2] / "migrations",
+        ]
+        for base in bases:
+            folder = base if self.backend == "postgres" else base / "sqlite"
+            if folder.is_dir():
+                return folder
+        return bases[0] if self.backend == "postgres" else bases[0] / "sqlite"
+
     def migrate(self) -> None:
-        base = Path(self.settings.migrations_dir)
-        folder = base if self.backend == "postgres" else base / "sqlite"
+        folder = self._migrations_folder()
         self._execute(
             "CREATE TABLE IF NOT EXISTS schema_migrations "
             "(version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
@@ -164,6 +177,13 @@ class Store:
             (status, case_id, version),
         )
 
+    def update_plan(self, case_id: str, plan: dict) -> dict:
+        self._execute(
+            "UPDATE plans SET status = ?, payload = ? WHERE case_id = ? AND version = ?",
+            (plan["status"], json.dumps(plan), case_id, plan["version"]),
+        )
+        return plan
+
     # -- evidence -----------------------------------------------------------
     def add_evidence(self, ev: dict) -> dict:
         self._execute(
@@ -206,6 +226,34 @@ class Store:
             ),
         )
         return finding
+
+    def add_finding_auto_id(self, case_id: str, finding: dict) -> dict:
+        # Sub-agents record findings in parallel; the count and the
+        # insert must be one locked step or two workstreams mint the
+        # same finding ID and collide on the primary key.
+        with self._lock:
+            row = self._fetchone(
+                "SELECT COUNT(*) AS n FROM findings WHERE case_id = ?", (case_id,)
+            )
+            finding = {
+                **finding,
+                "finding_id": f"FND-{int(row['n']) + 1:04d}",
+                "case_id": case_id,
+            }
+            cur = self._conn.execute(
+                self._sql(
+                    "INSERT INTO findings (finding_id, case_id, question_id, payload)"
+                    " VALUES (?, ?, ?, ?)"
+                ),
+                (
+                    finding["finding_id"],
+                    case_id,
+                    finding["question_id"],
+                    json.dumps(finding),
+                ),
+            )
+            self._conn.commit()
+            return finding
 
     def list_findings(self, case_id: str) -> list[dict]:
         rows = self._fetchall(
