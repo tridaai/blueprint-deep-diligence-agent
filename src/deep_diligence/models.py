@@ -47,6 +47,11 @@ class QuestionIn(BaseModel):
     id: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,31}$")
     text: str = Field(min_length=8, max_length=600)
     workstream: Literal["financial-scan", "product-scan", "market-scan"]
+    # Question ids within this brief whose workstream must finish
+    # before this question's workstream starts (schedule.py). The
+    # planner carries the declaration onto the plan, and the plan
+    # gate validates the resulting graph before approval.
+    depends_on: list[str] = Field(default_factory=list, max_length=6)
 
 
 class BriefIn(BaseModel):

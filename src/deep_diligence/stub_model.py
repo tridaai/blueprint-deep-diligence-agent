@@ -154,6 +154,7 @@ class ScriptedDiligenceModel(BaseChatModel):
                         "workstream": q["workstream"],
                         "objective": q["text"],
                         "keywords": WORKSTREAM_KEYWORDS[q["workstream"]],
+                        "depends_on": list(q.get("depends_on") or []),
                     }
                     for q in questions
                 ],
@@ -211,18 +212,32 @@ class ScriptedDiligenceModel(BaseChatModel):
             if remaining:
                 calls = []
                 for ws in remaining:
-                    description = "\n".join(
-                        [
-                            f"WORKSTREAM_ID: {ws['question_id']}",
-                            f"WORKSTREAM: {ws['workstream']}",
-                            f"SUBJECT: {plan['subject']}",
-                            f"QUESTION: {ws['objective']}",
-                            f"KEYWORDS: {', '.join(ws['keywords'])}",
-                            "Search the corpus, read the relevant documents, "
-                            "and record a finding for every Key facts ledger "
-                            "entry that answers the question.",
-                        ]
+                    lines = [
+                        f"WORKSTREAM_ID: {ws['question_id']}",
+                        f"WORKSTREAM: {ws['workstream']}",
+                        f"SUBJECT: {plan['subject']}",
+                        f"QUESTION: {ws['objective']}",
+                        f"KEYWORDS: {', '.join(ws['keywords'])}",
+                    ]
+                    prior = ws.get("prior_findings") or []
+                    if prior:
+                        lines.append(
+                            "PRIOR FINDINGS — recorded by the workstream(s) "
+                            "this one depends on; starting context only, "
+                            "your own findings still come from the documents:"
+                        )
+                        for finding in prior:
+                            lines.append(
+                                f"- [{finding['fact_ref'] or 'no ref'}] "
+                                f"{finding['claim']} "
+                                f"(evidence: {', '.join(finding['evidence_ids'])})"
+                            )
+                    lines.append(
+                        "Search the corpus, read the relevant documents, "
+                        "and record a finding for every Key facts ledger "
+                        "entry that answers the question."
                     )
+                    description = "\n".join(lines)
                     calls.append(
                         (
                             "task",
