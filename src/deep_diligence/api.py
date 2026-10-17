@@ -25,14 +25,19 @@ from .models import (
     CaseOut,
     ConflictNoteIn,
     DecisionIn,
+    DeleteCaseIn,
     EvidenceIn,
+    HoldIn,
     NoteIn,
     ProfileEvaluateIn,
     ProfilePromoteIn,
     ProfileRollbackIn,
     QuarantineDecisionIn,
+    RedactIn,
+    RedactionDecisionIn,
     ReplanIn,
     ResumeIn,
+    SourceIn,
     StalenessDecisionIn,
 )
 from .profiles import ProfileError, list_profile_ids, load_profile
@@ -441,6 +446,147 @@ def create_app(
             }
             for s in service.store.list_report_snapshots(case_id)
         ]
+
+    # -- source governance ---------------------------------------------------
+    @app.get("/api/sources")
+    def list_sources() -> list[dict]:
+        # The governed registry: every source evidence may cite,
+        # with its classification and its registration record.
+        return service.store.list_sources()
+
+    @app.post(
+        "/api/sources", status_code=201, dependencies=[Depends(require_api_key)]
+    )
+    def register_source(source: SourceIn) -> dict:
+        try:
+            return service.register_source(
+                source.analyst,
+                name=source.name,
+                kind=source.kind,
+                owner=source.owner,
+                usage_basis=source.usage_basis,
+                notes=source.notes,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except GateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/api/retention/sweep")
+    def retention_sweep() -> list[dict]:
+        # Cases past their retention, listed for an analyst's
+        # decision. The sweep is a report: it deletes nothing.
+        return service.retention_sweep()
+
+    @app.get("/api/retention/tombstones")
+    def list_tombstones() -> list[dict]:
+        # All that survives deleted cases: that they existed, and
+        # who ended them, and why.
+        return service.store.list_tombstones()
+
+    @app.get("/api/cases/{case_id}/sources")
+    def get_case_sources(case_id: str) -> dict:
+        get_case_or_404(case_id)
+        # The governance records behind the case's sources: the
+        # brief's allowed entries resolved, and the sources the
+        # evidence actually came from.
+        return service.case_sources(case_id)
+
+    @app.get("/api/cases/{case_id}/provenance")
+    def get_provenance(case_id: str) -> dict:
+        get_case_or_404(case_id)
+        # Every evidence item with its source's governance record,
+        # its hash, its ingestion path, and the findings and report
+        # claims that cite it.
+        return service.case_provenance(case_id)
+
+    @app.post(
+        "/api/cases/{case_id}/evidence/{evidence_id}/redact",
+        dependencies=[Depends(require_api_key)],
+    )
+    def redact_evidence(
+        case_id: str, evidence_id: str, request: RedactIn
+    ) -> dict:
+        get_case_or_404(case_id)
+        try:
+            return service.redact_evidence(
+                case_id, evidence_id, request.analyst, request.reason
+            )
+        except KeyError:
+            raise HTTPException(
+                status_code=404, detail="evidence not found"
+            ) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except GateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/api/cases/{case_id}/redactions")
+    def list_redactions(case_id: str) -> dict:
+        get_case_or_404(case_id)
+        return {
+            "redactions": service.store.list_redactions(case_id),
+            "flags": service.store.list_redaction_flags(case_id),
+        }
+
+    @app.post(
+        "/api/cases/{case_id}/redaction-flags/{flag_id}/decision",
+        dependencies=[Depends(require_api_key)],
+    )
+    def decide_redaction_flag(
+        case_id: str, flag_id: str, decision: RedactionDecisionIn
+    ) -> dict:
+        get_case_or_404(case_id)
+        try:
+            flag = service.decide_redaction_flag(
+                case_id,
+                flag_id,
+                decision.analyst,
+                decision.action,
+                decision.note,
+            )
+        except KeyError:
+            raise HTTPException(
+                status_code=404, detail="redaction flag not found"
+            ) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except GateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        case = service.store.get_case(case_id)
+        return {"flag": flag, "case_status": case["status"]}
+
+    @app.post(
+        "/api/cases/{case_id}/retention/hold",
+        dependencies=[Depends(require_api_key)],
+    )
+    def set_legal_hold(case_id: str, request: HoldIn) -> dict:
+        get_case_or_404(case_id)
+        try:
+            case = service.set_legal_hold(
+                case_id,
+                request.analyst,
+                request.action == "set",
+                request.reason,
+            )
+        except GateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return CaseOut(**case).model_dump()
+
+    @app.post(
+        "/api/cases/{case_id}/delete", dependencies=[Depends(require_api_key)]
+    )
+    def delete_case(case_id: str, request: DeleteCaseIn) -> dict:
+        get_case_or_404(case_id)
+        try:
+            tombstone = service.delete_case(
+                case_id, request.analyst, request.reason
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except GateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"tombstone": tombstone}
 
     # -- profile regression gate -------------------------------------------
     # The active profile is read from the promotion log; the only

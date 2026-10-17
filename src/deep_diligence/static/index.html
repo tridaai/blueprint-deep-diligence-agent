@@ -77,6 +77,8 @@
     <div id="interrupted"><p class="muted">None.</p></div>
     <h2>Harness profile gate</h2>
     <div id="profiles"><p class="muted">Loading…</p></div>
+    <h2>Source governance</h2>
+    <div id="governance"><p class="muted">Loading…</p></div>
   </aside>
   <section id="detail">
     <p class="muted">Pick a case, or create one from a sample brief.</p>
@@ -159,7 +161,7 @@ async function openCase(caseId) {
       ${bar("Steps", phase.consumed.steps, phase.granted.max_steps)}
       ${bar("Tokens", phase.consumed.tokens, phase.granted.max_tokens)}`;
   };
-  const [plan, findings, evidence, audit, report, ledger, verification, quarantine, conflicts, workstreams, checkpoint, notes, versions] = await Promise.all([
+  const [plan, findings, evidence, audit, report, ledger, verification, quarantine, conflicts, workstreams, checkpoint, notes, versions, provenance, caseSources, redactionData] = await Promise.all([
     api(`/api/cases/${caseId}/plan`).catch(() => null),
     api(`/api/cases/${caseId}/findings`),
     api(`/api/cases/${caseId}/evidence`),
@@ -173,6 +175,9 @@ async function openCase(caseId) {
     api(`/api/cases/${caseId}/checkpoint`).catch(() => null),
     api(`/api/cases/${caseId}/notes`).catch(() => []),
     api(`/api/cases/${caseId}/report/versions`).catch(() => []),
+    api(`/api/cases/${caseId}/provenance`).catch(() => null),
+    api(`/api/cases/${caseId}/sources`).catch(() => null),
+    api(`/api/cases/${caseId}/redactions`).catch(() => ({redactions: [], flags: []})),
   ]);
   const driftIds = new Set(((ledger && ledger.verification && ledger.verification.drift) || []).map(d => d.evidence_id));
   const canPlan = ["INTAKE", "PLAN_REJECTED"].includes(c.status);
@@ -238,7 +243,8 @@ async function openCase(caseId) {
             `<div class="finding">${esc(f.claim)} ${f.evidence_ids.map(e => `<a class="ev" data-ev="${e}">[${e}]</a>`).join(" ")}</div>`).join("")).join("")
           : '<p class="muted">No findings yet.</p>'}
         <h3 style="margin-top:14px">Evidence (${evidence.length})</h3>
-        ${evidence.map(e => `<div class="finding"><a class="ev" data-ev="${e.evidence_id}">[${e.evidence_id}]</a> ${esc(e.title)} <span class="muted">— ${esc(e.source)}, ${esc(e.doc_date)}</span></div>`).join("")}
+        ${evidence.map(e => `<div class="finding"><a class="ev" data-ev="${e.evidence_id}">[${e.evidence_id}]</a> ${esc(e.title)} <span class="muted">— ${esc(e.source)}, ${esc(e.doc_date)}</span>${e.redacted ? ' <strong style="color:#B42318">REDACTED</strong>' : ` <button class="danger" data-redact="${esc(e.evidence_id)}" style="padding:2px 8px;font-size:12px">Redact</button>`}</div>`).join("")}
+        <div class="muted">Redacting replaces an item's content with a marker and flags every report claim that cites it; the reason comes from the Source governance panel below and is recorded permanently.</div>
         <div id="ev-view"></div>
       </div>
       <div class="panel"><h3>Report draft ${report ? `(${esc(report.status)}${report.partial ? ", partial" : ""})` : ""}</h3>
@@ -292,6 +298,37 @@ async function openCase(caseId) {
             <button class="secondary" data-cnote="${esc(cf.conflict_id)}" ${canDecideReport ? "" : "disabled"}>Mark NOTED</button>
           </div>` : ""}
         </div>`).join("") : '<p class="muted">No conflicts. A conflict appears when two supported findings disagree on the same metric for the same period; corroboration — the same value from two sources — is not a conflict.</p>'}
+    </div>
+    <div class="panel" style="margin-top:16px"><h3>Source governance — provenance, retention, redaction</h3>
+      ${caseSources ? `<div class="muted">Sources this case runs on</div>
+        ${caseSources.used.map(s => s ? `<div class="finding"><strong>${esc(s.name)}</strong> — ${esc(s.kind)} · ${esc(s.usage_basis)} · owner: ${esc(s.owner)}</div>` : "").join("")}
+        ${caseSources.allowed.length ? `<div class="muted" style="margin-top:8px">Brief's allowed sources, resolved</div>` + caseSources.allowed.map(a => `<div class="finding"><strong>${esc(a.entry)}</strong> (${esc(a.resolves_to)})${a.sources.length ? " → " + a.sources.filter(Boolean).map(s => esc(s.name)).join(", ") : ""}</div>`).join("") : '<div class="muted">The brief allows the full corpus for this subject.</div>'}` : ""}
+      ${provenance ? `<div class="muted" style="margin-top:10px">Provenance — where this case's facts came from</div>
+        <table><tr><th>Evidence</th><th>Source (governance)</th><th>sha256</th><th>Arrived</th><th>Cited by</th></tr>
+        ${provenance.items.map(it => `<tr><td><a class="ev" data-ev="${it.evidence_id}">[${it.evidence_id}]</a> ${esc(it.title)}${it.redacted ? ' <strong style="color:#B42318">REDACTED</strong>' : ""}</td><td>${esc(it.source)}${it.source_registry ? `<br><span class="muted">${esc(it.source_registry.kind)} · ${esc(it.source_registry.usage_basis)} · ${esc(it.source_registry.owner)}</span>` : ' <span style="color:#B42318">UNREGISTERED</span>'}</td><td>${esc(it.sha256.slice(0, 12))}…</td><td>${esc(it.ingestion === "analyst_upload" ? "analyst upload" : "corpus intake")}</td><td>${esc([...it.cited_by_findings, ...it.cited_by_claims].join(", ") || "—")}</td></tr>`).join("")}
+        </table>` : ""}
+      <h3 style="margin-top:14px">Redaction</h3>
+      <p class="muted" style="margin-top:0">Redact an item from its row in the Evidence list, with the reason recorded here. Claims citing redacted evidence are flagged below; the report cannot be approved until each flag is acknowledged or its claim sent back.</p>
+      <input id="redact-reason" type="text" placeholder="Reason for the redaction (recorded, required)" style="width:100%">
+      ${redactionData.flags.length ? `<div style="margin-top:8px">` + redactionData.flags.map(f => `
+        <div class="finding"><strong>${esc(f.flag_id)}</strong> · claim ${esc(f.claim_id)} cites <a class="ev" data-ev="${esc(f.evidence_id)}">[${esc(f.evidence_id)}]</a> · <span class="status">${esc(f.status)}</span>
+          ${f.decided_by ? `<div class="muted">${esc(f.status)} by ${esc(f.decided_by)}${f.decision_note ? " — " + esc(f.decision_note) : ""}</div>` : ""}
+          ${f.status === "OPEN" ? `<div class="row">
+            <button class="secondary" data-flag-ack="${esc(f.flag_id)}" ${canDecideReport ? "" : "disabled"}>Acknowledge claim</button>
+            <button class="danger" data-flag-back="${esc(f.flag_id)}" ${canDecideReport ? "" : "disabled"}>Send claim back</button>
+          </div>` : ""}
+        </div>`).join("") + `</div>` : '<p class="muted">No redaction flags — no report claim cites redacted evidence.</p>'}
+      ${redactionData.redactions.length ? `<div class="muted" style="margin-top:6px">Redactions on this case</div>` + redactionData.redactions.map(r => `<div class="finding"><strong>${esc(r.redaction_id)}</strong> — <a class="ev" data-ev="${esc(r.evidence_id)}">[${esc(r.evidence_id)}]</a> ${esc(r.title)} · by ${esc(r.analyst)} · original sha256 ${esc(r.original_sha256.slice(0, 12))}… — "${esc(r.reason)}"</div>`).join("") : ""}
+      <h3 style="margin-top:14px">Retention — ${(c.retention_class || "standard") === "legal_hold" ? '<span style="color:#B42318">LEGAL HOLD</span>' : "standard"}</h3>
+      ${(c.retention_history || []).length ? c.retention_history.map(h => `<div class="finding">Hold <strong>${esc(h.action)}</strong> by ${esc(h.analyst)} on ${esc((h.at || "").slice(0, 10))}${h.reason ? ` — "${esc(h.reason)}"` : ""}</div>`).join("") : '<p class="muted">No hold acts on this case. A case under legal hold cannot be deleted; setting and clearing the hold are both recorded acts.</p>'}
+      <div class="row">
+        <input id="ret-reason" type="text" placeholder="Reason (recorded on the hold act; required for deletion)" style="flex:1">
+        ${(c.retention_class || "standard") === "legal_hold"
+          ? `<button id="act-hold-clear" class="secondary">Clear legal hold</button>`
+          : `<button id="act-hold-set" class="secondary">Set legal hold</button>`}
+        <button id="act-delete" class="danger" ${(c.retention_class || "standard") === "legal_hold" ? "disabled" : ""}>Delete case</button>
+      </div>
+      <p class="muted">Deletion removes the case's data and objects and leaves only a tombstone (id, subject, actor, reason, final report hash). It cannot be undone.</p>
     </div>
     <div class="panel" style="margin-top:16px"><h3>Continuity — checkpoint, late evidence, notes</h3>
       ${checkpoint ? `<div class="muted">Execution checkpoint — attempt ${checkpoint.attempt} on plan v${checkpoint.plan_version} · ${checkpoint.complete ? `complete (${esc(checkpoint.outcome || "")})` : "incomplete"} · budget at last write: ${checkpoint.budget_snapshot.case_consumed.subagents} sub-agent(s), ${checkpoint.budget_snapshot.case_consumed.wall_seconds}s wall clock</div>
@@ -420,6 +457,50 @@ async function openCase(caseId) {
     } catch (e) { alert(e.message); }
     await refreshCases(); await openCase(caseId);
   }));
+  document.querySelectorAll("[data-redact]").forEach(el => el.addEventListener("click", async () => {
+    const reason = ($("#redact-reason") || {}).value || "";
+    if (!reason.trim()) { alert("Redaction requires a recorded reason — enter it in the Source governance panel first."); return; }
+    el.disabled = true;
+    try {
+      await api(`/api/cases/${caseId}/evidence/${el.dataset.redact}/redact`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({analyst: "Console Analyst", reason: reason.trim()})});
+    } catch (e) { alert(e.message); }
+    await refreshCases(); await openCase(caseId);
+  }));
+  const flagAct = (attr, action) => document.querySelectorAll(`[data-${attr}]`).forEach(el => el.addEventListener("click", async () => {
+    el.disabled = true;
+    try {
+      await api(`/api/cases/${caseId}/redaction-flags/${el.dataset[attr]}/decision`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({analyst: "Console Analyst", action, note: action === "send_back" ? "Sent back from the console" : "Acknowledged from the console"})});
+    } catch (e) { alert(e.message); }
+    await refreshCases(); await openCase(caseId);
+  }));
+  flagAct("flag-ack", "acknowledge");
+  flagAct("flag-back", "send_back");
+  const holdBtn = (id, action) => {
+    const el = $(id);
+    if (el) el.addEventListener("click", async () => {
+      el.disabled = true;
+      try { await api(`/api/cases/${caseId}/retention/hold`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({analyst: "Console Analyst", action, reason: ($("#ret-reason") || {}).value || ""})}); }
+      catch (e) { alert(e.message); }
+      await refreshCases(); await openCase(caseId);
+    });
+  };
+  holdBtn("#act-hold-set", "set");
+  holdBtn("#act-hold-clear", "clear");
+  const delBtn = $("#act-delete");
+  if (delBtn) delBtn.addEventListener("click", async () => {
+    const reason = ($("#ret-reason") || {}).value || "";
+    if (!reason.trim()) { alert("Deletion requires a recorded reason — it is all of the case that survives, on the tombstone."); return; }
+    if (!confirm("Delete this case permanently? Its data and evidence objects are removed; only the tombstone remains.")) return;
+    delBtn.disabled = true;
+    try {
+      const out = await api(`/api/cases/${caseId}/delete`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({analyst: "Console Analyst", reason: reason.trim()})});
+      current = null;
+      $("#detail").innerHTML = `<p class="muted">Case deleted. Tombstone: ${esc(out.tombstone.case_id)} — ${esc(out.tombstone.subject)}, deleted by ${esc(out.tombstone.deleted_by)}: "${esc(out.tombstone.reason)}"</p>`;
+      await refreshCases(); await refreshGovernance();
+      return;
+    } catch (e) { alert(e.message); }
+    await refreshCases(); await openCase(caseId);
+  });
   document.querySelectorAll("a.ev").forEach(a => a.addEventListener("click", async () => {
     const ev = await api(`/api/cases/${caseId}/evidence/${a.dataset.ev}`);
     $("#ev-view").innerHTML = `<h3 style="margin-top:14px">[${esc(ev.evidence_id)}] ${esc(ev.title)}</h3><pre class="plain">${esc(ev.text)}</pre>`;
@@ -480,6 +561,60 @@ async function refreshProfiles() {
     box.innerHTML = `<p class="muted">Profile gate unavailable: ${esc(e.message)}</p>`;
   }
 }
+async function refreshGovernance() {
+  const box = $("#governance");
+  if (!box) return;
+  try {
+    const [sources, sweep, tombstones] = await Promise.all([
+      api("/api/sources"), api("/api/retention/sweep"), api("/api/retention/tombstones"),
+    ]);
+    box.innerHTML = `
+      <p class="muted" style="margin:4px 0">Evidence may only cite a registered source. Registration is a recorded act.</p>
+      ${sources.map(s => `<div style="border-top:1px solid var(--line);padding:5px 0">
+        <strong>${esc(s.name)}</strong><br>
+        <span class="muted">${esc(s.kind)} · ${esc(s.usage_basis)} · ${esc(s.owner)} · registered by ${esc(s.registered_by)}</span>
+      </div>`).join("")}
+      <div style="margin-top:10px">
+        <input id="src-name" type="text" placeholder="New source name" style="width:100%;margin-bottom:5px">
+        <div class="row" style="margin:0 0 5px">
+          <select id="src-kind" style="flex:1">
+            <option value="filing">filing</option><option value="news" selected>news</option>
+            <option value="internal dataset">internal dataset</option><option value="web">web</option>
+          </select>
+          <select id="src-basis" style="flex:1">
+            <option value="public" selected>public</option><option value="licensed">licensed</option>
+            <option value="client-provided">client-provided</option>
+          </select>
+        </div>
+        <input id="src-owner" type="text" placeholder="Owner (e.g. Trade press publisher)" style="width:100%;margin-bottom:5px">
+        <input id="src-notes" type="text" placeholder="Notes (optional)" style="width:100%">
+        <button class="wide" id="src-register">Register source</button>
+      </div>
+      <h3 style="margin:14px 0 4px">Retention sweep (${sweep.length} due)</h3>
+      ${sweep.length ? sweep.map(r => `<div class="case-card" data-case="${esc(r.case_id)}">
+          <div class="name">${esc(r.subject)}</div>
+          <div class="meta">${esc(r.case_id)} · retention ran out ${esc(r.retention_due_at.slice(0, 10))} — the sweep only lists; deletion is a per-case act.</div>
+        </div>`).join("") : '<p class="muted">No case is past its retention.</p>'}
+      ${tombstones.length ? `<h3 style="margin:14px 0 4px">Deleted cases (${tombstones.length})</h3>` + tombstones.map(t => `<div style="border-top:1px solid var(--line);padding:5px 0">
+          <strong>${esc(t.subject)}</strong><br>
+          <span class="muted">${esc(t.case_id)} · deleted by ${esc(t.deleted_by)} on ${esc(t.deleted_at.slice(0, 10))} — "${esc(t.reason)}"</span>
+        </div>`).join("") : ""}
+    `;
+    box.querySelectorAll(".case-card").forEach(el => el.addEventListener("click", () => openCase(el.dataset.case)));
+    const reg = $("#src-register");
+    if (reg) reg.addEventListener("click", async () => {
+      const name = $("#src-name").value.trim(), owner = $("#src-owner").value.trim();
+      if (!name || !owner) { alert("A source needs a name and an owner."); return; }
+      reg.disabled = true;
+      try {
+        await api("/api/sources", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({analyst: "Console Analyst", name, kind: $("#src-kind").value, owner, usage_basis: $("#src-basis").value, notes: $("#src-notes").value})});
+      } catch (e) { alert(e.message); }
+      await refreshGovernance();
+    });
+  } catch (e) {
+    box.innerHTML = `<p class="muted">Governance unavailable: ${esc(e.message)}</p>`;
+  }
+}
 async function init() {
   try {
     const ready = await api("/readiness");
@@ -497,6 +632,7 @@ async function init() {
   });
   await refreshCases();
   await refreshProfiles();
+  await refreshGovernance();
 }
 init();
 </script>

@@ -135,6 +135,46 @@ class ReplanIn(BaseModel):
     note: str = Field(default="", max_length=2000)
 
 
+class SourceIn(BaseModel):
+    """Registering a source is a recorded act: who registered it
+    is part of the record, alongside the classification."""
+    analyst: str = Field(min_length=1, max_length=120)
+    name: str = Field(min_length=2, max_length=200)
+    kind: Literal["filing", "news", "internal dataset", "web"]
+    owner: str = Field(min_length=1, max_length=200)
+    usage_basis: Literal["public", "licensed", "client-provided"]
+    notes: str = Field(default="", max_length=2000)
+
+
+class RedactIn(BaseModel):
+    analyst: str = Field(min_length=1, max_length=120)
+    # A redaction without a recorded reason is not a redaction;
+    # the reason is part of the redaction record, permanently.
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class RedactionDecisionIn(BaseModel):
+    analyst: str = Field(min_length=1, max_length=120)
+    # A redaction-flagged claim has exactly two analyst moves —
+    # acknowledge it, or send it back for re-investigation. There
+    # is no "approve over it" action, by design.
+    action: Literal["acknowledge", "send_back"]
+    note: str = Field(default="", max_length=2000)
+
+
+class HoldIn(BaseModel):
+    analyst: str = Field(min_length=1, max_length=120)
+    action: Literal["set", "clear"]
+    reason: str = Field(default="", max_length=2000)
+
+
+class DeleteCaseIn(BaseModel):
+    analyst: str = Field(min_length=1, max_length=120)
+    # Deletion is a recorded act; the reason lands on the
+    # tombstone, which is all of the case that survives.
+    reason: str = Field(min_length=1, max_length=2000)
+
+
 class ProfileEvaluateIn(BaseModel):
     candidate_id: str = Field(min_length=1, max_length=120)
     analyst: str = Field(min_length=1, max_length=120)
@@ -164,6 +204,10 @@ class CaseOut(BaseModel):
     # late for.
     stale_marks: list[dict[str, Any]] = Field(default_factory=list)
     staleness_decisions: list[dict[str, Any]] = Field(default_factory=list)
+    # Source governance: the case's retention class and the record
+    # of hold acts on it. A case under legal_hold refuses deletion.
+    retention_class: str = "standard"
+    retention_history: list[dict[str, Any]] = Field(default_factory=list)
     # The harness profile (id, version, target model) stamped on the
     # case at intake — the profile that ran its planning and
     # execution. Empty for cases created before profiles existed.
