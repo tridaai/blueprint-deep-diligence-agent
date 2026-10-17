@@ -272,6 +272,15 @@ def create_app(
         get_case_or_404(case_id)
         return service.store.list_audit(case_id)
 
+    @app.get("/api/cases/{case_id}/workstreams")
+    def get_workstreams(case_id: str) -> list[dict]:
+        get_case_or_404(case_id)
+        # Per-workstream execution status (completed / empty /
+        # failed / interrupted / not_run, with the reason where one
+        # applies): the report's record once composed, else folded
+        # from the audit trail's start/finish events.
+        return service.workstream_statuses(case_id)
+
     @app.get("/api/cases/{case_id}/budget")
     def get_budget(case_id: str) -> dict:
         case = get_case_or_404(case_id)

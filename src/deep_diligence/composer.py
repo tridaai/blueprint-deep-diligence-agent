@@ -11,7 +11,16 @@ coverage is itemised per question — ANSWERED, PARTIAL (findings
 exist but the run stopped mid-workstream), or NOT COVERED — derived
 in code by `question_coverage` from the claims and the plan's
 workstream mapping, and carried on the report record so the
-analyst's approval records the coverage it approved.
+analyst's approval records the coverage it approved. A completed
+run whose workstreams did not all complete — one failed, one ran
+empty — carries the same table outside the partial protocol, with
+the reason named on each uncovered row: a failed branch is visible
+in the report, never only in the audit trail.
+
+Claims are composed in plan order (the brief's question order,
+then fact ref), never in the order sub-agents happened to record
+them, so the report is a function of the finding set: repeated
+executions of the same case produce the same draft.
 
 Composition is also when citations are *made*: each composed claim
 gets a claim ID (CLM-0001, ...) and a citation-ledger entry recording
@@ -45,6 +54,7 @@ def question_coverage(
     brief: dict,
     claims: list[dict],
     interrupted_questions: list[str] | tuple[str, ...] = (),
+    workstream_status: list[dict] | None = None,
 ) -> list[dict]:
     """Coverage per brief question, derived in code from the
     report's claims and the plan's workstream mapping (the caller
@@ -56,10 +66,16 @@ def question_coverage(
       its workstream was not the one interrupted.
     - PARTIAL — findings exist, but the run stopped mid-workstream,
       so the question's investigation is incomplete.
-    - NOT COVERED — no findings recorded for the question.
+    - NOT COVERED — no findings recorded for the question. When the
+      execution record explains why — the workstream failed, ran
+      empty, was interrupted, or never ran — the row carries that
+      reason, so an uncovered question never reads as a mystery.
     """
     counts = _coverage(brief, claims)
     interrupted = set(interrupted_questions or ())
+    statuses = {
+        s["question_id"]: s for s in (workstream_status or [])
+    }
     detail = []
     for question in brief["questions"]:
         found = counts.get(question["id"], 0)
@@ -69,10 +85,35 @@ def question_coverage(
             status = "PARTIAL"
         else:
             status = "ANSWERED"
-        detail.append(
-            {"question_id": question["id"], "status": status, "findings": found}
-        )
+        row = {"question_id": question["id"], "status": status, "findings": found}
+        if status == "NOT COVERED":
+            record = statuses.get(question["id"])
+            if record is not None and record.get("reason"):
+                row["reason"] = record["reason"]
+        detail.append(row)
     return detail
+
+
+def coverage_detail_for(
+    brief: dict,
+    claims: list[dict],
+    *,
+    partial: bool,
+    interrupted_questions: list[str] | tuple[str, ...] = (),
+    workstream_status: list[dict] | None = None,
+) -> list[dict] | None:
+    """The coverage table a report owes its analyst, or None.
+
+    Partial reports always carry one (the R5 protocol). A completed
+    run carries one when the execution record is not clean — any
+    workstream failed, empty, interrupted, or never ran — so the
+    failure is named in the report, not only in the audit trail. A
+    clean run carries none, exactly as reports always have.
+    """
+    statuses = workstream_status or []
+    if not partial and all(s["status"] == "completed" for s in statuses):
+        return None
+    return question_coverage(brief, claims, interrupted_questions, statuses)
 
 
 def _render_markdown(
@@ -109,19 +150,22 @@ def _render_markdown(
             "investigated.",
             "",
         ]
-        if coverage_detail:
-            lines += ["Coverage by question:", ""]
-            for row in coverage_detail:
-                line = (
-                    f"- {row['question_id']} — {row['status']} "
-                    f"({row['findings']} finding(s) in this report)"
-                )
-                if row["status"] == "PARTIAL":
-                    line += " — the run stopped inside this workstream"
-                elif row["status"] == "NOT COVERED":
+    if coverage_detail:
+        lines += ["Coverage by question:", ""]
+        for row in coverage_detail:
+            line = (
+                f"- {row['question_id']} — {row['status']} "
+                f"({row['findings']} finding(s) in this report)"
+            )
+            if row["status"] == "PARTIAL":
+                line += " — the run stopped inside this workstream"
+            elif row["status"] == "NOT COVERED":
+                if row.get("reason"):
+                    line += f" — {row['reason']}"
+                else:
                     line += " — not investigated"
-                lines.append(line)
-            lines.append("")
+            lines.append(line)
+        lines.append("")
     for question in brief["questions"]:
         lines += [f"## {question['id']} — {question['text']}", ""]
         q_claims = [c for c in claims if c["question_id"] == question["id"]]
@@ -246,6 +290,31 @@ def _coverage(brief: dict, claims: list[dict]) -> dict:
     return coverage
 
 
+def _plan_order(brief: dict, findings: list[dict]) -> list[dict]:
+    """Composition order: the brief's question order, then fact
+    ref, then claim text — a pure function of the finding set.
+
+    Findings are stored in the order sub-agents recorded them,
+    which under parallel workstreams is completion order and can
+    differ between two executions of the same case. Composing in
+    plan order makes the report a function of WHAT was found, not
+    of who finished first: repeated executions of the same case
+    produce the same report.
+    """
+    question_index = {
+        q["id"]: i for i, q in enumerate(brief["questions"])
+    }
+    return sorted(
+        findings,
+        key=lambda f: (
+            question_index.get(f["question_id"], len(question_index)),
+            f.get("fact_ref") or "",
+            f["claim"],
+            f["finding_id"],
+        ),
+    )
+
+
 def compose_report(
     store: Store,
     objects: ObjectStore,
@@ -255,13 +324,14 @@ def compose_report(
     exceeded_kind: str | None = None,
     exceeded_phase: str | None = None,
     interrupted_questions: list[str] | tuple[str, ...] = (),
+    workstream_status: list[dict] | None = None,
 ) -> dict:
     case_id = case["case_id"]
     brief = case["brief"]
     evidence = {ev["evidence_id"]: ev for ev in store.list_evidence(case_id)}
     claims: list[dict] = []
     refused: list[str] = []
-    for finding in store.list_findings(case_id):
+    for finding in _plan_order(brief, store.list_findings(case_id)):
         valid = [e for e in finding["evidence_ids"] if e in evidence]
         if not valid:
             refused.append(finding["finding_id"])
@@ -274,10 +344,12 @@ def compose_report(
             }
         )
     entries = build_ledger(store, objects, case_id, claims)
-    coverage_detail = (
-        question_coverage(brief, claims, interrupted_questions)
-        if partial
-        else None
+    coverage_detail = coverage_detail_for(
+        brief,
+        claims,
+        partial=partial,
+        interrupted_questions=interrupted_questions,
+        workstream_status=workstream_status,
     )
     report = {
         "case_id": case_id,
@@ -286,6 +358,7 @@ def compose_report(
         "exceeded_kind": exceeded_kind,
         "exceeded_phase": exceeded_phase,
         "interrupted_questions": list(interrupted_questions),
+        "workstreams": list(workstream_status or []),
         "coverage_detail": coverage_detail,
         "approved_coverage": None,
         "markdown": _render_markdown(
@@ -350,10 +423,12 @@ def apply_verification(
         "verified_at": verifier_report["verified_at"],
     }
     evidence_count = store.count_evidence(case_id)
-    coverage_detail = (
-        question_coverage(brief, claims, report.get("interrupted_questions"))
-        if report["partial"]
-        else None
+    coverage_detail = coverage_detail_for(
+        brief,
+        claims,
+        partial=report["partial"],
+        interrupted_questions=report.get("interrupted_questions") or (),
+        workstream_status=report.get("workstreams"),
     )
     report = {
         **report,

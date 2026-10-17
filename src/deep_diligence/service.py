@@ -41,6 +41,7 @@ from .models import BudgetIn, BriefIn
 from .objects import ObjectStore, build_object_store
 from .profiles import ProfileError, load_profile
 from .promotion import ProfileGate
+from .schedule import build_handoff, plan_defects, waves, workstream_dependencies
 from .store import Store, build_store, utcnow
 from .tools import build_case_tools
 from .verifier import verify_case
@@ -50,6 +51,34 @@ log = logging.getLogger("deep_diligence.service")
 
 class GateError(RuntimeError):
     """A lifecycle transition the case state does not allow."""
+
+
+def _aggregate_execution_usage(
+    usages: list[dict], tripped: dict | None
+) -> dict:
+    """One execution's usage across its scheduled waves.
+
+    Steps, tokens, spawns, and wall clock sum across waves; the
+    budget ledger keeps each wave's own checkpoint, and this is the
+    case-level picture the case record carries. A single-wave
+    execution — every plan without dependencies — returns its one
+    run's usage untouched, exactly as execution always reported.
+    """
+    if len(usages) == 1:
+        return usages[0]
+    total = {
+        "phase": "execution",
+        "steps": sum(u.get("steps", 0) for u in usages),
+        "subagents": sum(u.get("subagents", 0) for u in usages),
+        "tokens": sum(u.get("tokens", 0) for u in usages),
+        "tool_calls": sum(u.get("tool_calls", 0) for u in usages),
+        "wall_seconds": round(
+            sum(float(u.get("wall_seconds", 0.0)) for u in usages), 2
+        ),
+        "exceeded": (tripped or {}).get("exceeded"),
+        "interrupted_spawns": (tripped or {}).get("interrupted_spawns", []),
+    }
+    return total
 
 
 class CaseService:
@@ -198,15 +227,23 @@ class CaseService:
             "recursion_limit": max(150, phase_caps["max_steps"] * 6),
         }
         error: BudgetExceededError | None = None
+        failure: Exception | None = None
         try:
             agent.invoke({"messages": [HumanMessage(content=message)]}, config=config)
         except BudgetExceededError as exc:
             error = exc
+        except Exception as exc:  # noqa: BLE001 — re-raised below
+            # A crashed run still owes the ledger its events and its
+            # consumption checkpoint; the caller decides what the
+            # failure means for the workstreams it was running.
+            failure = exc
         self._flush_audit(case_id, sink)
         usage = guard.usage()
         self.store.add_audit(
             case_id, "budget_consumed", {"phase": phase, "usage": usage}
         )
+        if failure is not None:
+            raise failure
         return usage, error
 
     # -- intake ---------------------------------------------------------------
@@ -293,6 +330,19 @@ class CaseService:
         if case["status"] != "PLAN_READY":
             raise GateError(f"no plan awaiting decision (status {case['status']})")
         plan = self.store.get_plan(case_id)
+        if approve:
+            # The plan gate checks the dependency graph in code
+            # (schedule.py): an unknown dependency or a cycle means
+            # the plan cannot be scheduled, so it cannot be approved
+            # either. The defect is named, and the plan stays at the
+            # gate for the analyst to send back.
+            defects = plan_defects(
+                (plan.get("plan") or {}).get("workstreams", [])
+            )
+            if defects:
+                raise GateError(
+                    "plan cannot be approved: " + "; ".join(defects)
+                )
         plan["status"] = "APPROVED" if approve else "REJECTED"
         plan["decided_by"] = analyst
         plan["decision_note"] = note
@@ -314,28 +364,70 @@ class CaseService:
                 f"execution requires an approved plan (status {case['status']})"
             )
         plan = self.store.get_plan(case_id)
+        plan_doc = plan.get("plan") or {}
+        workstreams = plan_doc.get("workstreams", [])
+        # Defence in depth: the plan gate validated this graph at
+        # approval, and an unschedulable graph must still never run.
+        defects = plan_defects(workstreams)
+        if defects:
+            raise GateError(
+                "plan cannot be executed: " + "; ".join(defects)
+            )
+        schedule = waves(workstreams)
         backend = self._backend(case_id)
         backend.delete_direct("/execution/notes.md")
         self.store.update_case(case_id, status="EXECUTING")
-        self.store.add_audit(case_id, "execution_started", {"plan_version": plan["version"]})
-        usage, error = self._run_agent(case, execute_message(case, plan), "execution")
+        self.store.add_audit(
+            case_id,
+            "execution_started",
+            {
+                "plan_version": plan["version"],
+                "waves": [
+                    [ws["question_id"] for ws in layer] for layer in schedule
+                ],
+            },
+        )
+        statuses: dict[str, dict] = {}
+        usages: list[dict] = []
+        error: BudgetExceededError | None = None
+        interrupted: list[str] = []
+        tripped_usage: dict | None = None
+        for index, layer in enumerate(schedule, start=1):
+            usage, error, layer_statuses, layer_interrupted = self._run_wave(
+                case, plan_doc, layer, index
+            )
+            usages.append(usage)
+            statuses.update(layer_statuses)
+            if error is not None:
+                interrupted = layer_interrupted
+                tripped_usage = usage
+                break
+        if error is not None:
+            # Waves the stop kept from ever starting: their
+            # workstreams are part of the execution record too.
+            for entry in workstreams:
+                qid = entry["question_id"]
+                if qid not in statuses:
+                    statuses[qid] = {
+                        "question_id": qid,
+                        "workstream": entry["workstream"],
+                        "status": "not_run",
+                        "findings": 0,
+                        "reason": (
+                            "the run stopped on its budget before "
+                            "this workstream started"
+                        ),
+                    }
+        usage = _aggregate_execution_usage(usages, tripped_usage)
+        status_list = [
+            statuses[ws["question_id"]]
+            for ws in workstreams
+            if ws["question_id"] in statuses
+        ]
         case = self.store.update_case(
             case_id, usage={**case.get("usage", {}), "execution": usage}
         )
         if error is not None:
-            # The workstreams the run stopped inside of, resolved
-            # from the plan's workstream order and the spawns still
-            # open when the cap tripped. The composer turns these
-            # into the partial report's PARTIAL rows.
-            order = [
-                ws["question_id"]
-                for ws in (plan.get("plan") or {}).get("workstreams", [])
-            ]
-            interrupted = [
-                order[i - 1]
-                for i in usage.get("interrupted_spawns", [])
-                if 1 <= i <= len(order)
-            ]
             report = compose_report(
                 self.store,
                 self.objects,
@@ -344,6 +436,7 @@ class CaseService:
                 exceeded_kind=error.kind,
                 exceeded_phase="execution",
                 interrupted_questions=interrupted,
+                workstream_status=status_list,
             )
             self.store.add_audit(
                 case_id, "report_composed", {"partial": True, "usage": usage}
@@ -352,7 +445,9 @@ class CaseService:
             self.store.update_case(case_id, status="BUDGET_EXHAUSTED")
             log.info("case %s budget exhausted (%s)", case_id, error.kind)
             return report
-        report = compose_report(self.store, self.objects, case)
+        report = compose_report(
+            self.store, self.objects, case, workstream_status=status_list
+        )
         self.store.add_audit(
             case_id, "report_composed", {"partial": False, "usage": usage}
         )
@@ -360,6 +455,204 @@ class CaseService:
         self.store.update_case(case_id, status="DRAFT_READY")
         log.info("case %s draft ready", case_id)
         return report
+
+    def _run_wave(
+        self, case: dict, plan_doc: dict, layer: list[dict], wave_index: int
+    ) -> tuple[dict, BudgetExceededError | None, dict, list[str]]:
+        """One scheduled wave: a single harness run over one
+        topological layer of the plan.
+
+        The wave's workstreams are the run's whole world — the
+        execute message carries only them, with each dependent's
+        handoff (its prerequisites' recorded findings, verbatim)
+        attached. Start and finish are audit events per workstream,
+        so the schedule is provable after the fact: a dependent's
+        `workstream_started` can only follow its prerequisites'
+        `workstream_finished`, because the run that spawns it is
+        not invoked until the wave that finished them has returned.
+
+        Failure isolation lives here too: a wave whose run raises
+        (anything but the budget stop, which _run_agent returns)
+        marks its finding-less workstreams failed, with the error
+        named, and execution continues with the next wave — one
+        branch's failure never fails the whole case silently.
+        Returns (usage, budget_error, statuses, interrupted).
+        """
+        case_id = case["case_id"]
+        wave_entries: list[dict] = []
+        findings_now = self.store.list_findings(case_id)
+        for entry in layer:
+            entry = dict(entry)
+            deps = workstream_dependencies(entry)
+            if deps:
+                handoff = build_handoff(findings_now, entry)
+                entry["prior_findings"] = handoff
+                self.store.add_audit(
+                    case_id,
+                    "workstream_handoff",
+                    {
+                        "question_id": entry["question_id"],
+                        "wave": wave_index,
+                        "depends_on": deps,
+                        "finding_ids": [h["finding_id"] for h in handoff],
+                    },
+                )
+            wave_entries.append(entry)
+            self.store.add_audit(
+                case_id,
+                "workstream_started",
+                {
+                    "question_id": entry["question_id"],
+                    "workstream": entry["workstream"],
+                    "wave": wave_index,
+                },
+            )
+        wave_plan = {
+            "plan": {
+                "subject": plan_doc.get("subject"),
+                "workstreams": wave_entries,
+            }
+        }
+        usage: dict = {}
+        error: BudgetExceededError | None = None
+        failure: Exception | None = None
+        try:
+            usage, error = self._run_agent(
+                case, execute_message(case, wave_plan), "execution"
+            )
+        except Exception as exc:  # noqa: BLE001 — isolation, see docstring
+            failure = exc
+            self.store.add_audit(
+                case_id,
+                "workstream_run_failed",
+                {
+                    "wave": wave_index,
+                    "workstreams": [e["question_id"] for e in layer],
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+            )
+            log.warning(
+                "case %s wave %d run failed: %s", case_id, wave_index, exc
+            )
+        # The workstreams this run stopped inside of, resolved from
+        # the wave's own order and the spawns still open when the
+        # cap tripped. The composer turns these into the partial
+        # report's PARTIAL rows.
+        order = [entry["question_id"] for entry in layer]
+        interrupted = [
+            order[i - 1]
+            for i in usage.get("interrupted_spawns", [])
+            if 1 <= i <= len(order)
+        ]
+        interrupted_ids = set(interrupted)
+        counts: dict[str, int] = {}
+        for finding in self.store.list_findings(case_id):
+            counts[finding["question_id"]] = (
+                counts.get(finding["question_id"], 0) + 1
+            )
+        statuses: dict[str, dict] = {}
+        for entry in layer:
+            qid = entry["question_id"]
+            found = counts.get(qid, 0)
+            if found > 0:
+                # Its output is in the case record, whatever else
+                # happened in the wave around it.
+                status = {
+                    "question_id": qid,
+                    "workstream": entry["workstream"],
+                    "status": "completed",
+                    "findings": found,
+                    "reason": None,
+                }
+            elif failure is not None:
+                status = {
+                    "question_id": qid,
+                    "workstream": entry["workstream"],
+                    "status": "failed",
+                    "findings": 0,
+                    "reason": f"{type(failure).__name__}: {failure}",
+                }
+            elif error is not None and qid in interrupted_ids:
+                status = {
+                    "question_id": qid,
+                    "workstream": entry["workstream"],
+                    "status": "interrupted",
+                    "findings": 0,
+                    "reason": (
+                        f"the run stopped on its {error.kind} budget "
+                        "inside this workstream"
+                    ),
+                }
+            elif error is not None:
+                status = {
+                    "question_id": qid,
+                    "workstream": entry["workstream"],
+                    "status": "not_run",
+                    "findings": 0,
+                    "reason": (
+                        "the run stopped on its budget before this "
+                        "workstream was spawned"
+                    ),
+                }
+            else:
+                status = {
+                    "question_id": qid,
+                    "workstream": entry["workstream"],
+                    "status": "empty",
+                    "findings": 0,
+                    "reason": (
+                        "the workstream ran and recorded no findings"
+                    ),
+                }
+            statuses[qid] = status
+            self.store.add_audit(
+                case_id,
+                "workstream_finished",
+                {
+                    "question_id": qid,
+                    "workstream": entry["workstream"],
+                    "wave": wave_index,
+                    "status": status["status"],
+                    "findings": found,
+                    "reason": status["reason"],
+                },
+            )
+        return usage, error, statuses, interrupted
+
+    def workstream_statuses(self, case_id: str) -> list[dict]:
+        """Per-workstream execution status for a case: the report's
+        record once a report exists, else the audit fold (a
+        workstream started but not yet finished reads as running)."""
+        self._require_case(case_id)
+        report = self.store.get_report(case_id)
+        if report is not None and report.get("workstreams"):
+            return report["workstreams"]
+        statuses: dict[str, dict] = {}
+        order: list[str] = []
+        for entry in self.store.list_audit(case_id):
+            payload = entry.get("payload") or {}
+            qid = payload.get("question_id")
+            if not qid:
+                continue
+            if entry["event"] == "workstream_started":
+                if qid not in statuses:
+                    order.append(qid)
+                statuses[qid] = {
+                    "question_id": qid,
+                    "workstream": payload.get("workstream"),
+                    "status": "running",
+                    "findings": 0,
+                    "reason": None,
+                }
+            elif entry["event"] == "workstream_finished":
+                statuses[qid] = {
+                    "question_id": qid,
+                    "workstream": payload.get("workstream"),
+                    "status": payload.get("status"),
+                    "findings": payload.get("findings", 0),
+                    "reason": payload.get("reason"),
+                }
+        return [statuses[qid] for qid in order]
 
     # -- budget amendment -----------------------------------------------------
     def amend_budget(
