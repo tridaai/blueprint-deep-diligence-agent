@@ -503,6 +503,78 @@ class Store:
             "DELETE FROM case_files WHERE case_id = ? AND path = ?", (case_id, path)
         )
 
+    # -- profile regression gate ------------------------------------------------
+    # Append-only by construction: these two tables have insert and
+    # read methods and no update or delete anywhere in the store. An
+    # evaluation or a promotion that could be rewritten after the
+    # fact would prove nothing, so the port does not offer the verbs.
+    def _next_seq(self, table: str) -> int:
+        # Insertion order is the log's order: timestamps resolve to
+        # the second, so each append takes the next sequence number
+        # under the store lock instead of trusting the clock.
+        row = self._fetchone(f"SELECT COALESCE(MAX(seq), 0) AS s FROM {table}")
+        return int(row["s"]) + 1
+
+    def add_evaluation(self, record: dict) -> dict:
+        with self._lock:
+            seq = self._next_seq("profile_evaluations")
+            self._execute(
+                "INSERT INTO profile_evaluations"
+                " (seq, evaluation_id, candidate_id, candidate_sha, verdict, payload, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    seq,
+                    record["evaluation_id"],
+                    record["candidate"]["id"],
+                    record["candidate_sha256"],
+                    record["verdict"],
+                    json.dumps(record),
+                    record["created_at"],
+                ),
+            )
+        return record
+
+    def get_evaluation(self, evaluation_id: str) -> dict | None:
+        row = self._fetchone(
+            "SELECT payload FROM profile_evaluations WHERE evaluation_id = ?",
+            (evaluation_id,),
+        )
+        return json.loads(row["payload"]) if row else None
+
+    def list_evaluations(self) -> list[dict]:
+        rows = self._fetchall(
+            "SELECT payload FROM profile_evaluations ORDER BY seq"
+        )
+        return [json.loads(r["payload"]) for r in rows]
+
+    def add_promotion(self, record: dict) -> dict:
+        with self._lock:
+            seq = self._next_seq("profile_promotions")
+            self._execute(
+                "INSERT INTO profile_promotions"
+                " (seq, promotion_id, kind, candidate_id, payload, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    seq,
+                    record["promotion_id"],
+                    record["kind"],
+                    record["candidate"]["id"],
+                    json.dumps(record),
+                    record["created_at"],
+                ),
+            )
+        return record
+
+    def list_promotions(self) -> list[dict]:
+        rows = self._fetchall(
+            "SELECT payload FROM profile_promotions ORDER BY seq"
+        )
+        return [json.loads(r["payload"]) for r in rows]
+
+    def latest_promotion(self) -> dict | None:
+        promotions = self.list_promotions()
+        return promotions[-1] if promotions else None
+
     # -- audit ------------------------------------------------------------------
     def add_audit(self, case_id: str, event: str, payload: dict | None = None) -> None:
         self._execute(
