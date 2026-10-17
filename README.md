@@ -95,10 +95,16 @@ is accountable for lives in our code around it:
   context. Sub-agents search the case evidence and read documents
   through the virtual filesystem, where evidence is mounted read-only
   at `/evidence/<EV-ID>.md` — the agent cannot alter its sources.
-- **Citations, enforced twice.** `record_finding` refuses a claim
-  with no valid evidence ID. The report composer then re-verifies
-  every citation while assembling the draft; a claim whose evidence
-  no longer resolves is refused again and named in the method note.
+- **Citations, enforced at every step.** `record_finding` refuses a
+  claim with no valid evidence ID. The report composer re-verifies
+  every citation while assembling the draft — a claim whose evidence
+  no longer resolves is refused again and named in the method note —
+  and composition writes the **citation ledger**: a stored record
+  mapping every claim in the report (CLM-0001, ...) to the finding
+  behind it and the SHA-256 of each cited item's bytes at citation
+  time. The report's References section is generated from the ledger,
+  and the ledger is queryable in the console and at
+  `GET /api/cases/{id}/ledger`.
 - **Budgets in code.** Each run is wrapped by a callback guard that
   counts model steps, sub-agent spawns, tokens, and wall-clock time
   against the brief's budget. Crossing a cap aborts the run; the
@@ -106,8 +112,12 @@ is accountable for lives in our code around it:
   partial report that names the questions it did not cover instead
   of truncating silently.
 - **The report gate.** The draft is final only when an analyst
-  approves it. Rejection at either gate is a normal state, with the
-  analyst's note kept on the record.
+  approves it — and approval first re-verifies the citation ledger
+  against the evidence store. If a cited item's bytes no longer hash
+  to the value recorded at citation time, the evidence changed after
+  the fact: the report is flagged **EVIDENCE_DRIFT** and cannot be
+  approved until the ledger re-verifies clean. Rejection at either
+  gate is a normal state, with the analyst's note kept on the record.
 - **Audit trail.** Case creation, evidence ingestion, plan versions
   and decisions, every sub-agent spawn, budget events, composition,
   and report decisions are recorded per case and visible in the
@@ -117,20 +127,26 @@ is accountable for lives in our code around it:
 
 ## Evals
 
-The gate is the three gold case packs in the corpus: a vendor
-diligence, an acquisition screen, and a partnership diligence, each
+The gate is the case packs in the corpus: three gold packs (a vendor
+diligence, an acquisition screen, and a partnership diligence), each
 with planted facts distributed across documents, planted
-contradictions, and known-correct outcomes. `make evals` runs every
-case end to end on the offline model and grades:
+contradictions, and known-correct outcomes — plus a
+citation-integrity pack whose corpus holds a near-duplicate document
+carrying a stale figure, where the current figure's finding must cite
+the current document. `make evals` runs every case end to end on the
+offline model and grades:
 
 - **Finding recall** against the planted gold facts — gate ≥ 0.90
 - **Citation completeness** on composed claims — gate 100%
+- **Citation correctness** — every figure a claim states must appear
+  in the evidence it cites — gate 100%
 - **Budget compliance** — every run finishes inside its caps
 
-Current results (offline stub): recall **1.000** on all three cases,
-citation completeness **1.000**, budgets compliant. The pytest suite
-(26 tests) covers the gates, the budget caps, the evidence backend,
-and the citation rules separately.
+Current results (offline stub): recall **1.000** on all four cases,
+citation completeness and correctness **1.000**, budgets compliant.
+The pytest suite (30 tests) covers the gates, the budget caps, the
+evidence backend, the citation rules, and the ledger's drift gate
+separately.
 
 ## Production profile
 
@@ -174,6 +190,8 @@ src/deep_diligence/
   tools.py        search_corpus / read_document / record_finding
   backend.py      virtual filesystem over the evidence store
   evidence.py     corpus ingestion with IDs, sources, hashes
+  ledger.py       the citation ledger: claim→evidence record with
+                  citation-time hashes, re-verified at the gate
   composer.py     deterministic report assembly from findings
   corpus.py       the bundled evidence corpus (generated for this
                   blueprint) and the gold case packs

@@ -29,6 +29,7 @@ it, so they hold for any model the harness runs.
 | Backend | `backend.py` | Deep Agents filesystem protocol over the evidence store |
 | Evidence | `evidence.py` | Corpus ingestion: IDs, source, hash, retrieval time |
 | Composer | `composer.py` | Deterministic report assembly from findings |
+| Ledger | `ledger.py` | Citation ledger: claim→evidence entries with citation-time hashes; re-verification |
 | Store | `store.py` | Case store port: SQLite (local) / PostgreSQL (production) |
 | Objects | `objects.py` | Object-store port: local dir / S3-compatible |
 | Corpus | `corpus.py` | Generated evidence corpus + gold case packs |
@@ -66,11 +67,20 @@ draft and lands in `BUDGET_EXHAUSTED`; the report gate still applies.
    keeps what it found.
 4. **Composition.** Deterministic code groups findings by question,
    re-verifies every citation against the case evidence (a claim that
-   fails is refused and named), and renders the draft. The composer —
-   never the model — writes the report.
-5. **Report gate.** An analyst approves or rejects. Approval is what
-   makes a report final; the agent itself never issues a
-   recommendation.
+   fails is refused and named), and renders the draft. Each composed
+   claim gets a claim ID and a **citation-ledger** entry: the finding
+   behind it, and for each cited evidence item the SHA-256 of its
+   bytes at citation time, read live from the object store. The
+   report's References section is generated from the ledger. The
+   composer — never the model — writes the report.
+5. **Report gate.** An analyst approves or rejects. Approval first
+   re-verifies the ledger: every cited item's current bytes must
+   hash to the value recorded at citation time. A mismatch means the
+   evidence changed after the fact — the report is flagged
+   **EVIDENCE_DRIFT**, the drift is named in the audit trail, and the
+   approval is refused until a re-verification comes back clean.
+   Approval is what makes a report final; the agent itself never
+   issues a recommendation.
 
 ## Budgets
 
@@ -101,9 +111,9 @@ live in the object store.
 Payload-JSON tables, Postgres and SQLite variants of the same schema
 (numbered migrations in `migrations/` and `migrations/sqlite/`):
 `cases`, `plans` (versioned), `evidence`, `findings`, `reports`,
-`case_files`, `audit`. The audit trail records case creation,
+`citation_ledger`, `case_files`, `audit`. The audit trail records case creation,
 evidence ingestion, plan generation and decisions, sub-agent spawns,
-budget events, composition, and report decisions.
+budget events, composition, evidence-drift detections, and report decisions.
 
 ## Models
 
@@ -121,6 +131,9 @@ the audit trail plus structured JSON logs with request IDs.
 - Contradictions are planted in the corpus and both sides surface as
   findings; explicit conflict records in the report are a later round.
 - Web fetch is not wired; the evidence universe is the case corpus.
-- The verifier pass (independent claim re-check) is a later round;
-  R1's citation defence is record-time enforcement plus composer
-  re-verification.
+- The verifier pass (independent claim re-check by a second agent)
+  is a later round; the citation defence today is record-time
+  enforcement, composer re-verification, and the ledger's
+  deterministic hash re-verification at the report gate — none of
+  which re-reads a claim against its evidence for *meaning*, only
+  for presence, resolution, and byte identity.
