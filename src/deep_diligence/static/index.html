@@ -73,6 +73,8 @@
     <div class="muted" style="margin-top:8px">Cases run on the offline corpus with the model configured on the server (the offline stub by default).</div>
     <h2>Cases</h2>
     <div id="cases"></div>
+    <h2>Interrupted cases</h2>
+    <div id="interrupted"><p class="muted">None.</p></div>
     <h2>Harness profile gate</h2>
     <div id="profiles"><p class="muted">Loading…</p></div>
   </aside>
@@ -120,6 +122,27 @@ async function refreshCases() {
       <div class="meta">${esc(c.case_id)} · <span class="status">${esc(c.status)}</span></div>
     </div>`).join("") || '<p class="muted">No cases yet.</p>';
   document.querySelectorAll(".case-card").forEach(el => el.addEventListener("click", () => openCase(el.dataset.case)));
+  await refreshInterrupted();
+}
+async function refreshInterrupted() {
+  const box = $("#interrupted");
+  if (!box) return;
+  try {
+    const rows = await api("/api/cases/interrupted");
+    box.innerHTML = rows.length ? rows.map(r => `
+      <div class="case-card">
+        <div class="name">${esc(r.subject)}</div>
+        <div class="meta">${esc(r.case_id)} · stopped mid-execution — done: ${esc(r.completed_questions.join(", ") || "none")} · still owed: ${esc(r.pending_questions.join(", ") || "none")}</div>
+        <button class="wide" data-resume="${esc(r.case_id)}">Resume execution</button>
+      </div>`).join("") : '<p class="muted">None — no case is stranded mid-execution.</p>';
+    box.querySelectorAll("[data-resume]").forEach(el => el.addEventListener("click", async () => {
+      el.disabled = true;
+      try { await api(`/api/cases/${el.dataset.resume}/resume`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({analyst: "Console Analyst"})}); }
+      catch (e) { alert(e.message); }
+      await refreshCases();
+      if (current) await openCase(current);
+    }));
+  } catch (e) { box.innerHTML = `<p class="muted">Unavailable: ${esc(e.message)}</p>`; }
 }
 function bar(label, used, cap) {
   const pct = cap ? Math.min(100, Math.round(100 * (used || 0) / cap)) : 0;
@@ -136,7 +159,7 @@ async function openCase(caseId) {
       ${bar("Steps", phase.consumed.steps, phase.granted.max_steps)}
       ${bar("Tokens", phase.consumed.tokens, phase.granted.max_tokens)}`;
   };
-  const [plan, findings, evidence, audit, report, ledger, verification, quarantine, conflicts, workstreams] = await Promise.all([
+  const [plan, findings, evidence, audit, report, ledger, verification, quarantine, conflicts, workstreams, checkpoint, notes, versions] = await Promise.all([
     api(`/api/cases/${caseId}/plan`).catch(() => null),
     api(`/api/cases/${caseId}/findings`),
     api(`/api/cases/${caseId}/evidence`),
@@ -147,12 +170,18 @@ async function openCase(caseId) {
     api(`/api/cases/${caseId}/quarantine`).catch(() => []),
     api(`/api/cases/${caseId}/conflicts`).catch(() => []),
     api(`/api/cases/${caseId}/workstreams`).catch(() => []),
+    api(`/api/cases/${caseId}/checkpoint`).catch(() => null),
+    api(`/api/cases/${caseId}/notes`).catch(() => []),
+    api(`/api/cases/${caseId}/report/versions`).catch(() => []),
   ]);
   const driftIds = new Set(((ledger && ledger.verification && ledger.verification.drift) || []).map(d => d.evidence_id));
   const canPlan = ["INTAKE", "PLAN_REJECTED"].includes(c.status);
   const canExecute = ["APPROVED", "REPORT_REJECTED"].includes(c.status);
   const canDecidePlan = c.status === "PLAN_READY";
   const canDecideReport = ["DRAFT_READY", "BUDGET_EXHAUSTED"].includes(c.status);
+  const canResume = c.status === "EXECUTING";
+  const canReplan = ["PLAN_READY", "APPROVED", "DRAFT_READY", "BUDGET_EXHAUSTED", "REPORT_REJECTED", "PLAN_REJECTED"].includes(c.status);
+  const staleMarks = c.stale_marks || [];
   const byQuestion = {};
   findings.forEach(f => { (byQuestion[f.question_id] = byQuestion[f.question_id] || []).push(f); });
   $("#detail").innerHTML = `
@@ -166,6 +195,8 @@ async function openCase(caseId) {
       <button id="act-plan-ok" class="secondary" ${canDecidePlan ? "" : "disabled"}>Approve plan</button>
       <button id="act-plan-no" class="danger" ${canDecidePlan ? "" : "disabled"}>Reject plan</button>
       <button id="act-exec" ${canExecute ? "" : "disabled"}>Execute (approved plan)</button>
+      <button id="act-resume" class="secondary" ${canResume ? "" : "disabled"}>Resume execution</button>
+      <button id="act-replan" class="secondary" ${canReplan ? "" : "disabled"}>Revise plan (re-plan)</button>
       <button id="act-report-ok" class="secondary" ${canDecideReport ? "" : "disabled"}>Approve report</button>
       <button id="act-report-no" class="danger" ${canDecideReport ? "" : "disabled"}>Reject report</button>
     </div>
@@ -262,6 +293,35 @@ async function openCase(caseId) {
           </div>` : ""}
         </div>`).join("") : '<p class="muted">No conflicts. A conflict appears when two supported findings disagree on the same metric for the same period; corroboration — the same value from two sources — is not a conflict.</p>'}
     </div>
+    <div class="panel" style="margin-top:16px"><h3>Continuity — checkpoint, late evidence, notes</h3>
+      ${checkpoint ? `<div class="muted">Execution checkpoint — attempt ${checkpoint.attempt} on plan v${checkpoint.plan_version} · ${checkpoint.complete ? `complete (${esc(checkpoint.outcome || "")})` : "incomplete"} · budget at last write: ${checkpoint.budget_snapshot.case_consumed.subagents} sub-agent(s), ${checkpoint.budget_snapshot.case_consumed.wall_seconds}s wall clock</div>
+        ${Object.entries(checkpoint.workstreams).map(([q, w]) => `<div class="finding"><strong>${esc(q)}</strong> — ${esc(w.status)} (wave ${w.wave}, ${w.findings} finding(s))${w.reason ? ` — ${esc(w.reason)}` : ""}</div>`).join("")}` : '<p class="muted">No execution checkpoint yet — one is written when execution starts and updated as each wave completes. If the process dies mid-execution, the checkpoint is what a resume reads.</p>'}
+      ${staleMarks.length ? `<h3 style="margin-top:14px;color:#B42318">Stale workstreams — awaiting an analyst decision</h3>
+        <p class="muted" style="margin-top:0">Evidence arrived after planning. Execution is refused until the desk answers: re-plan around the new evidence (marked workstreams re-run; the rest keep their findings), or proceed with the staleness recorded in the report's limits.</p>
+        ${staleMarks.map(m => `<div class="finding"><strong>${esc(m.question_id)}</strong> (${esc(m.workstream)}) — marked stale by <a class="ev" data-ev="${esc(m.evidence_id)}">[${esc(m.evidence_id)}]</a></div>`).join("")}
+        <div class="row">
+          <input id="stale-note" type="text" placeholder="Decision note (recorded)" style="flex:1">
+          <button id="act-stale-proceed" class="secondary">Proceed — staleness on the record</button>
+          <button id="act-stale-replan">Re-plan around it</button>
+        </div>` : ""}
+      ${(c.staleness_decisions || []).length ? `<h3 style="margin-top:14px">Staleness decisions</h3>` + c.staleness_decisions.map(d => `<div class="finding"><strong>${esc(d.action)}</strong> by ${esc(d.analyst)} on ${esc((d.at || "").slice(0, 10))} — evidence ${esc(d.evidence_ids.join(", "))}, questions ${esc(d.questions.join(", "))}${d.note ? ` — "${esc(d.note)}"` : ""}</div>`).join("") : ""}
+      <h3 style="margin-top:14px">Add evidence to this case</h3>
+      <p class="muted" style="margin-top:0">A document that arrived after intake. It is stored with its hash like any evidence; if the case already has a plan, the workstreams it speaks to are marked stale (above) until an analyst decides.</p>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
+        <input id="ev-title" type="text" placeholder="Document title">
+        <input id="ev-source" type="text" placeholder="Source label (e.g. Trade coverage)">
+        <input id="ev-kind" type="text" placeholder="Kind (filing, news, product, ...)">
+        <input id="ev-date" type="text" placeholder="Date (YYYY-MM-DD)">
+      </div>
+      <textarea id="ev-text" rows="4" style="width:100%;margin-top:6px" placeholder="Document text — a '## Key facts' ledger at the end is what workstreams read facts from"></textarea>
+      <div class="row"><button id="act-ev-add" class="secondary">Add evidence</button></div>
+      <h3 style="margin-top:14px">Analyst notes (${notes.length})</h3>
+      <p class="muted" style="margin-top:0">The desk's memory of this case. Notes are context for the next plan — they are never evidence and can never be cited by a finding.</p>
+      ${notes.length ? notes.map(n => `<div class="finding"><strong>${esc(n.note_id)}</strong> · ${esc(n.analyst)} · ${esc(n.created_at)}<br>${esc(n.text)}</div>`).join("") : '<p class="muted">No notes yet.</p>'}
+      <textarea id="note-text" rows="2" style="width:100%" placeholder="What should the next session on this case know?"></textarea>
+      <div class="row"><button id="act-note-add" class="secondary">Add note</button></div>
+      ${versions.length ? `<h3 style="margin-top:14px">Earlier report versions (${versions.length})</h3>` + versions.map(v => `<div class="finding"><strong>${esc(v.snapshot_id)}</strong> — ${esc(v.reason)} by ${esc(v.analyst)} · draft composed ${esc(v.composed_at)} (${esc(v.report_status)}${v.partial ? ", partial" : ""})</div>`).join("") : ""}
+    </div>
     <div class="panel" style="margin-top:16px"><h3>Audit trail (${audit.length})</h3>
       <table><tr><th>Time</th><th>Event</th><th>Detail</th></tr>
       ${audit.map(a => `<tr><td>${esc(a.ts)}</td><td>${esc(a.event)}</td><td>${esc(JSON.stringify(a.payload))}</td></tr>`).join("")}
@@ -283,6 +343,51 @@ async function openCase(caseId) {
   }));
   qact("qback", "reinvestigate");
   qact("qdrop", "drop");
+  const actBody = (id, url, payload) => {
+    const el = $(id);
+    if (el) el.addEventListener("click", async () => {
+      el.disabled = true;
+      try { await api(url, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload)}); }
+      catch (e) { alert(e.message); }
+      await refreshCases(); await openCase(caseId);
+    });
+  };
+  actBody("#act-resume", `/api/cases/${caseId}/resume`, {analyst: "Console Analyst"});
+  actBody("#act-replan", `/api/cases/${caseId}/replan`, {analyst: "Console Analyst", note: "Revised from the console"});
+  const staleBtn = (id, action) => {
+    const el = $(id);
+    if (el) el.addEventListener("click", async () => {
+      el.disabled = true;
+      try { await api(`/api/cases/${caseId}/staleness/decision`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({analyst: "Console Analyst", action, note: $("#stale-note").value || ""})}); }
+      catch (e) { alert(e.message); }
+      await refreshCases(); await openCase(caseId);
+    });
+  };
+  staleBtn("#act-stale-proceed", "proceed");
+  staleBtn("#act-stale-replan", "replan");
+  const evBtn = $("#act-ev-add");
+  if (evBtn) evBtn.addEventListener("click", async () => {
+    const date = $("#ev-date").value.trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { alert("Give the document a date (YYYY-MM-DD)."); return; }
+    evBtn.disabled = true;
+    try {
+      await api(`/api/cases/${caseId}/evidence`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({
+        analyst: "Console Analyst",
+        title: $("#ev-title").value, source: $("#ev-source").value,
+        kind: $("#ev-kind").value, doc_date: date, text: $("#ev-text").value,
+      })});
+    } catch (e) { alert(e.message); }
+    await refreshCases(); await openCase(caseId);
+  });
+  const noteBtn = $("#act-note-add");
+  if (noteBtn) noteBtn.addEventListener("click", async () => {
+    const text = $("#note-text").value.trim();
+    if (!text) { alert("The note is empty."); return; }
+    noteBtn.disabled = true;
+    try { await api(`/api/cases/${caseId}/notes`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({analyst: "Console Analyst", text})}); }
+    catch (e) { alert(e.message); }
+    await refreshCases(); await openCase(caseId);
+  });
   const amendBtn = $("#act-amend");
   if (amendBtn) amendBtn.addEventListener("click", async () => {
     const num = id => { const v = document.getElementById(id).value; return v === "" ? null : parseInt(v, 10); };

@@ -25,10 +25,15 @@ from .models import (
     CaseOut,
     ConflictNoteIn,
     DecisionIn,
+    EvidenceIn,
+    NoteIn,
     ProfileEvaluateIn,
     ProfilePromoteIn,
     ProfileRollbackIn,
     QuarantineDecisionIn,
+    ReplanIn,
+    ResumeIn,
+    StalenessDecisionIn,
 )
 from .profiles import ProfileError, list_profile_ids, load_profile
 from .promotion import PromotionError
@@ -108,6 +113,27 @@ def create_app(
     @app.get("/api/cases")
     def list_cases() -> list[dict]:
         return [CaseOut(**c).model_dump() for c in service.store.list_cases()]
+
+    # Declared before /api/cases/{case_id} so the literal path is
+    # not read as a case id.
+    @app.get("/api/cases/interrupted")
+    def list_interrupted() -> list[dict]:
+        # Cases an interrupted execution left in EXECUTING: what
+        # had completed, what is still owed, and the checkpoint the
+        # resume will read. Listing is also the detection point —
+        # the first scan records the interruption in the case's
+        # audit trail.
+        return [
+            {
+                "case_id": entry["case"]["case_id"],
+                "subject": entry["case"]["subject"],
+                "status": entry["case"]["status"],
+                "checkpoint": entry["checkpoint"],
+                "completed_questions": entry["completed_questions"],
+                "pending_questions": entry["pending_questions"],
+            }
+            for entry in service.interrupted_cases()
+        ]
 
     @app.get("/api/cases/{case_id}")
     def get_case(case_id: str) -> dict:
@@ -306,6 +332,115 @@ def create_app(
         except GateError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return CaseOut(**case).model_dump()
+
+    # -- long-case continuity ------------------------------------------------
+    @app.post(
+        "/api/cases/{case_id}/resume", dependencies=[Depends(require_api_key)]
+    )
+    def resume_execution(case_id: str, request: ResumeIn) -> dict:
+        get_case_or_404(case_id)
+        try:
+            return service.resume_execution(case_id, request.analyst)
+        except GateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/api/cases/{case_id}/checkpoint")
+    def get_checkpoint(case_id: str) -> dict:
+        get_case_or_404(case_id)
+        checkpoint = service.store.get_checkpoint(case_id)
+        if checkpoint is None:
+            raise HTTPException(status_code=404, detail="no checkpoint yet")
+        return checkpoint
+
+    @app.post(
+        "/api/cases/{case_id}/evidence",
+        status_code=201,
+        dependencies=[Depends(require_api_key)],
+    )
+    def add_evidence(case_id: str, document: EvidenceIn) -> dict:
+        get_case_or_404(case_id)
+        try:
+            result = service.add_case_evidence(
+                case_id,
+                document.analyst,
+                title=document.title,
+                kind=document.kind,
+                source=document.source,
+                doc_date=document.doc_date,
+                text=document.text,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except GateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {
+            "evidence": result["evidence"],
+            "stale_questions": result["stale_questions"],
+        }
+
+    @app.get("/api/cases/{case_id}/notes")
+    def list_notes(case_id: str) -> list[dict]:
+        get_case_or_404(case_id)
+        return service.store.list_notes(case_id)
+
+    @app.post(
+        "/api/cases/{case_id}/notes",
+        status_code=201,
+        dependencies=[Depends(require_api_key)],
+    )
+    def add_note(case_id: str, note: NoteIn) -> dict:
+        get_case_or_404(case_id)
+        try:
+            return service.add_case_note(case_id, note.analyst, note.text)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/cases/{case_id}/staleness/decision",
+        dependencies=[Depends(require_api_key)],
+    )
+    def decide_staleness(case_id: str, decision: StalenessDecisionIn) -> dict:
+        get_case_or_404(case_id)
+        try:
+            case = service.decide_staleness(
+                case_id, decision.analyst, decision.action, decision.note
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except GateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return CaseOut(**case).model_dump()
+
+    @app.post(
+        "/api/cases/{case_id}/replan", dependencies=[Depends(require_api_key)]
+    )
+    def replan_case(case_id: str, request: ReplanIn) -> dict:
+        get_case_or_404(case_id)
+        try:
+            case = service.replan_case(case_id, request.analyst, request.note)
+        except GateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return CaseOut(**case).model_dump()
+
+    @app.get("/api/cases/{case_id}/report/versions")
+    def list_report_versions(case_id: str) -> list[dict]:
+        get_case_or_404(case_id)
+        # Drafts a plan revision superseded, preserved when the
+        # revision was requested — the current report lives at
+        # /report; these are its predecessors.
+        return [
+            {
+                "snapshot_id": s["snapshot_id"],
+                "reason": s["reason"],
+                "analyst": s["analyst"],
+                "created_at": s["created_at"],
+                "report_status": s["report"]["status"],
+                "partial": s["report"]["partial"],
+                "composed_at": s["report"]["composed_at"],
+                "markdown": s["report"]["markdown"],
+            }
+            for s in service.store.list_report_snapshots(case_id)
+        ]
 
     # -- profile regression gate -------------------------------------------
     # The active profile is read from the promotion log; the only

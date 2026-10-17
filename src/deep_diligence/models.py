@@ -101,6 +101,40 @@ class QuarantineDecisionIn(BaseModel):
     note: str = Field(default="", max_length=2000)
 
 
+class EvidenceIn(BaseModel):
+    """A document an analyst adds to a case mid-flight. It becomes
+    case evidence under the same rules as the intake corpus; the
+    free-text body is the document, stored byte for byte."""
+    analyst: str = Field(min_length=1, max_length=120)
+    title: str = Field(min_length=2, max_length=200)
+    kind: str = Field(min_length=2, max_length=40)
+    source: str = Field(min_length=2, max_length=200)
+    doc_date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    text: str = Field(min_length=1, max_length=200_000)
+
+
+class NoteIn(BaseModel):
+    analyst: str = Field(min_length=1, max_length=120)
+    text: str = Field(min_length=1, max_length=4000)
+
+
+class ResumeIn(BaseModel):
+    analyst: str = Field(min_length=1, max_length=120)
+
+
+class StalenessDecisionIn(BaseModel):
+    analyst: str = Field(min_length=1, max_length=120)
+    # The only two answers to marked staleness: re-plan around the
+    # new evidence, or proceed with the staleness on the record.
+    action: Literal["proceed", "replan"]
+    note: str = Field(default="", max_length=2000)
+
+
+class ReplanIn(BaseModel):
+    analyst: str = Field(min_length=1, max_length=120)
+    note: str = Field(default="", max_length=2000)
+
+
 class ProfileEvaluateIn(BaseModel):
     candidate_id: str = Field(min_length=1, max_length=120)
     analyst: str = Field(min_length=1, max_length=120)
@@ -124,6 +158,12 @@ class CaseOut(BaseModel):
     analyst: str
     brief: dict[str, Any]
     usage: dict[str, Any] = Field(default_factory=dict)
+    # Long-case continuity: workstreams marked stale by evidence
+    # that arrived mid-case and awaits an analyst decision, and the
+    # decisions recorded on them. Empty on a case nothing arrived
+    # late for.
+    stale_marks: list[dict[str, Any]] = Field(default_factory=list)
+    staleness_decisions: list[dict[str, Any]] = Field(default_factory=list)
     # The harness profile (id, version, target model) stamped on the
     # case at intake — the profile that ran its planning and
     # execution. Empty for cases created before profiles existed.

@@ -22,6 +22,15 @@ from __future__ import annotations
 
 from .corpus import WORKSTREAM_KEYWORDS
 
+# A document speaks to a workstream when at least this many of the
+# workstream's stems appear in it. One shared stem is cross-talk,
+# not signal — the stem lists overlap by design ("adopt" sits in
+# market-scan's list and inside every "adoption" a product document
+# prints; "fund" sits inside "funded") — and marking a workstream
+# stale is an interruption to the desk, so it takes real evidence
+# of relevance, not a stray word.
+MIN_STALE_SCORE = 2
+
 
 def workstream_scores(text: str) -> dict[str, int]:
     """How strongly a document speaks to each workstream: the
@@ -47,10 +56,10 @@ def question_workstreams(case: dict, plan: dict | None) -> dict[str, str]:
 
 def stale_questions(case: dict, plan: dict | None, text: str) -> list[dict]:
     """The questions a newly arrived document makes stale: every
-    question whose workstream the document speaks to (score > 0),
-    each with the score that touched it."""
+    question whose workstream the document speaks to (score at
+    least MIN_STALE_SCORE), each with the score that touched it."""
     scores = workstream_scores(text)
-    touched = {ws for ws, score in scores.items() if score > 0}
+    touched = {ws for ws, score in scores.items() if score >= MIN_STALE_SCORE}
     if not touched:
         return []
     return [
