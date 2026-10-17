@@ -644,6 +644,72 @@ class Store:
         )
         return [json.loads(r["payload"]) for r in rows]
 
+    # -- report section notes -------------------------------------------------
+    # An analyst's annotations on sections of a case's report.
+    # Their own table, apart from the report record: adding or
+    # editing a note never writes to the reports table, so a note
+    # cannot change the report's body or its hash. The JSON export
+    # is the only surface that carries them, in its annotations
+    # field.
+    def add_section_note(self, case_id: str, note: dict) -> dict:
+        with self._lock:
+            row = self._fetchone(
+                "SELECT COUNT(*) AS n FROM report_section_notes"
+                " WHERE case_id = ?",
+                (case_id,),
+            )
+            note = {
+                **note,
+                "note_id": f"SNOTE-{int(row['n']) + 1:04d}",
+                "case_id": case_id,
+            }
+            self._conn.execute(
+                self._sql(
+                    "INSERT INTO report_section_notes"
+                    " (note_id, case_id, section, analyst, payload, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?)"
+                ),
+                (
+                    note["note_id"],
+                    case_id,
+                    note["section"],
+                    note["analyst"],
+                    json.dumps(note),
+                    note["created_at"],
+                ),
+            )
+            self._conn.commit()
+            return note
+
+    def list_section_notes(self, case_id: str) -> list[dict]:
+        rows = self._fetchall(
+            "SELECT payload FROM report_section_notes WHERE case_id = ?"
+            " ORDER BY note_id",
+            (case_id,),
+        )
+        return [json.loads(r["payload"]) for r in rows]
+
+    def get_section_note(self, case_id: str, note_id: str) -> dict | None:
+        row = self._fetchone(
+            "SELECT payload FROM report_section_notes"
+            " WHERE case_id = ? AND note_id = ?",
+            (case_id, note_id),
+        )
+        return json.loads(row["payload"]) if row else None
+
+    def update_section_note(self, case_id: str, note: dict) -> dict:
+        self._execute(
+            "UPDATE report_section_notes SET analyst = ?, payload = ?"
+            " WHERE case_id = ? AND note_id = ?",
+            (
+                note["analyst"],
+                json.dumps(note),
+                case_id,
+                note["note_id"],
+            ),
+        )
+        return note
+
     # -- report snapshots ---------------------------------------------------------
     def add_report_snapshot(self, case_id: str, snapshot: dict) -> dict:
         with self._lock:

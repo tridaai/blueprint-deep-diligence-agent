@@ -118,6 +118,20 @@ class NoteIn(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
 
 
+class SectionNoteIn(BaseModel):
+    """An analyst's annotation on one section of a case's report.
+    Margin commentary only: it is stored apart from the report and
+    surfaces solely in the JSON export's annotations field."""
+    analyst: str = Field(min_length=1, max_length=120)
+    section: str = Field(min_length=1, max_length=60)
+    text: str = Field(min_length=1, max_length=4000)
+
+
+class SectionNoteEditIn(BaseModel):
+    analyst: str = Field(min_length=1, max_length=120)
+    text: str = Field(min_length=1, max_length=4000)
+
+
 class ResumeIn(BaseModel):
     analyst: str = Field(min_length=1, max_length=120)
 

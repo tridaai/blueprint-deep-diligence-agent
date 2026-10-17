@@ -54,6 +54,7 @@ from .models import BudgetIn, BriefIn
 from .objects import ObjectStore, build_object_store, sha256_hex
 from .profiles import ProfileError, load_profile
 from .promotion import ProfileGate
+from .report_model import export_report, model_sections
 from .schedule import build_handoff, plan_defects, waves, workstream_dependencies
 from .store import Store, build_store, utcnow
 from .tools import build_case_tools
@@ -1339,6 +1340,112 @@ class CaseService:
         )
         return note
 
+    # -- report formats + section notes ---------------------------------------
+    def _report_or_gate(self, case_id: str) -> tuple[dict, dict]:
+        case = self._require_case(case_id)
+        report = self.store.get_report(case_id)
+        if report is None:
+            raise GateError(f"case {case_id} has no report yet")
+        if report.get("model") is None:
+            # A report record that predates the structured model:
+            # re-render it through the finalize step so every
+            # format the desk serves comes from the one model.
+            report = apply_conflicts(
+                self.store,
+                self.objects,
+                case,
+                report,
+                self.store.list_conflicts(case_id),
+            )
+        return case, report
+
+    def report_html(self, case_id: str) -> str:
+        """The print-ready HTML rendering of the case's report —
+        the HTML stored on the report record at finalize time,
+        rendered from the same model as the markdown."""
+        _, report = self._report_or_gate(case_id)
+        return report["html"]
+
+    def report_export(self, case_id: str) -> dict:
+        """The JSON export: the report's structured model plus the
+        analyst's section annotations, in their own field."""
+        case, report = self._report_or_gate(case_id)
+        return export_report(self.store, case, report)
+
+    def add_report_section_note(
+        self, case_id: str, analyst: str, section: str, text: str
+    ) -> dict:
+        """Annotate one section of the case's report.
+
+        A section note is margin commentary: it lives in its own
+        table, never in the report body — the markdown and the HTML
+        do not carry it, and writing or editing one never changes
+        the report record (or its hash). Its only surface is the
+        JSON export's annotations field. The section must be one of
+        the report's sections: a question id, or a named section
+        (executive_summary, conflicts, risks_and_open_items,
+        references, verification, method_and_limits).
+        """
+        case = self._require_case(case_id)
+        if self.store.get_report(case_id) is None:
+            raise GateError(f"case {case_id} has no report to annotate")
+        valid = {s["key"] for s in model_sections(case)}
+        if section not in valid:
+            raise ValueError(
+                f"unknown report section {section!r}; "
+                f"sections are: {', '.join(sorted(valid))}"
+            )
+        if not text or not text.strip():
+            raise ValueError("a section note needs text")
+        note = self.store.add_section_note(
+            case_id,
+            {
+                "section": section,
+                "analyst": analyst,
+                "text": text.strip(),
+                "created_at": utcnow(),
+                "edited_at": None,
+            },
+        )
+        self.store.add_audit(
+            case_id,
+            "report_section_note_added",
+            {
+                "note_id": note["note_id"],
+                "section": section,
+                "analyst": analyst,
+            },
+        )
+        return note
+
+    def edit_report_section_note(
+        self, case_id: str, note_id: str, analyst: str, text: str
+    ) -> dict:
+        """Edit a section note's text. The edit is recorded (who,
+        when) on the note and in the audit trail; the report record
+        is not touched — an edit can no more change the report
+        than the original note could."""
+        self._require_case(case_id)
+        note = self.store.get_section_note(case_id, note_id)
+        if note is None:
+            raise KeyError(note_id)
+        if not text or not text.strip():
+            raise ValueError("a section note needs text")
+        note["text"] = text.strip()
+        note["edited_at"] = utcnow()
+        note["edited_by"] = analyst
+        self.store.update_section_note(case_id, note)
+        self.store.add_audit(
+            case_id,
+            "report_section_note_edited",
+            {
+                "note_id": note_id,
+                "section": note["section"],
+                "analyst": analyst,
+            },
+        )
+        return note
+
     # -- source governance ------------------------------------------------------
     def register_source(
         self,
@@ -1681,6 +1788,19 @@ class CaseService:
         )
         if action == "send_back":
             self.store.update_case(case_id, status="APPROVED")
+        if action == "acknowledge":
+            # The acknowledged flag stands in the draft's Risks and
+            # open items section with its disposition — re-render so
+            # the report at the gate shows the decision.
+            report = self.store.get_report(case_id)
+            if report is not None:
+                apply_conflicts(
+                    self.store,
+                    self.objects,
+                    case,
+                    report,
+                    self.store.list_conflicts(case_id),
+                )
         return flag
 
     # -- budget amendment -----------------------------------------------------
@@ -1967,6 +2087,19 @@ class CaseService:
         )
         if action == "reinvestigate":
             self.store.update_case(case_id, status="APPROVED")
+        if action == "drop":
+            # The disposition belongs in the draft the analyst is
+            # looking at: the Risks and open items section is
+            # generated from the quarantine records, so re-render.
+            report = self.store.get_report(case_id)
+            if report is not None:
+                apply_conflicts(
+                    self.store,
+                    self.objects,
+                    case,
+                    report,
+                    self.store.list_conflicts(case_id),
+                )
         return record
 
     def decide_report(self, case_id: str, analyst: str, approve: bool, note: str = "") -> dict:

@@ -11,7 +11,7 @@ import logging
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from .budgets import budget_view
 from .config import Settings, load_settings
@@ -37,6 +37,8 @@ from .models import (
     RedactionDecisionIn,
     ReplanIn,
     ResumeIn,
+    SectionNoteEditIn,
+    SectionNoteIn,
     SourceIn,
     StalenessDecisionIn,
 )
@@ -217,6 +219,69 @@ def create_app(
         if report is None:
             raise HTTPException(status_code=404, detail="no report yet")
         return report
+
+    @app.get("/api/cases/{case_id}/report/html")
+    def get_report_html(case_id: str) -> HTMLResponse:
+        # The print-ready rendering: self-contained HTML (inline
+        # CSS, no external assets), rendered at finalize time from
+        # the same structured model as the markdown.
+        get_case_or_404(case_id)
+        try:
+            return HTMLResponse(content=service.report_html(case_id))
+        except GateError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/cases/{case_id}/report/export")
+    def get_report_export(case_id: str) -> dict:
+        # The JSON export: the report's structured model (questions,
+        # claims with citations and support grades, conflicts,
+        # coverage, risks and open items, references) plus the
+        # analyst's section annotations in their own field.
+        get_case_or_404(case_id)
+        try:
+            return service.report_export(case_id)
+        except GateError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/cases/{case_id}/report/notes")
+    def list_report_notes(case_id: str) -> list[dict]:
+        get_case_or_404(case_id)
+        return service.store.list_section_notes(case_id)
+
+    @app.post(
+        "/api/cases/{case_id}/report/notes",
+        status_code=201,
+        dependencies=[Depends(require_api_key)],
+    )
+    def add_report_note(case_id: str, note: SectionNoteIn) -> dict:
+        get_case_or_404(case_id)
+        try:
+            return service.add_report_section_note(
+                case_id, note.analyst, note.section, note.text
+            )
+        except GateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.put(
+        "/api/cases/{case_id}/report/notes/{note_id}",
+        dependencies=[Depends(require_api_key)],
+    )
+    def edit_report_note(
+        case_id: str, note_id: str, note: SectionNoteEditIn
+    ) -> dict:
+        get_case_or_404(case_id)
+        try:
+            return service.edit_report_section_note(
+                case_id, note_id, note.analyst, note.text
+            )
+        except KeyError:
+            raise HTTPException(
+                status_code=404, detail="section note not found"
+            ) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get("/api/cases/{case_id}/verification")
     def get_verification(case_id: str) -> dict:

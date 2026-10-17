@@ -161,7 +161,7 @@ async function openCase(caseId) {
       ${bar("Steps", phase.consumed.steps, phase.granted.max_steps)}
       ${bar("Tokens", phase.consumed.tokens, phase.granted.max_tokens)}`;
   };
-  const [plan, findings, evidence, audit, report, ledger, verification, quarantine, conflicts, workstreams, checkpoint, notes, versions, provenance, caseSources, redactionData] = await Promise.all([
+  const [plan, findings, evidence, audit, report, ledger, verification, quarantine, conflicts, workstreams, checkpoint, notes, versions, provenance, caseSources, redactionData, sectionNotes] = await Promise.all([
     api(`/api/cases/${caseId}/plan`).catch(() => null),
     api(`/api/cases/${caseId}/findings`),
     api(`/api/cases/${caseId}/evidence`),
@@ -178,6 +178,7 @@ async function openCase(caseId) {
     api(`/api/cases/${caseId}/provenance`).catch(() => null),
     api(`/api/cases/${caseId}/sources`).catch(() => null),
     api(`/api/cases/${caseId}/redactions`).catch(() => ({redactions: [], flags: []})),
+    api(`/api/cases/${caseId}/report/notes`).catch(() => []),
   ]);
   const driftIds = new Set(((ledger && ledger.verification && ledger.verification.drift) || []).map(d => d.evidence_id));
   const canPlan = ["INTAKE", "PLAN_REJECTED"].includes(c.status);
@@ -253,7 +254,16 @@ async function openCase(caseId) {
         ${report && report.coverage_detail ? `<div style="margin-bottom:10px"><div class="muted">${report.partial ? `Coverage (partial report — stopped on its ${esc(report.exceeded_kind || "budget")} budget during ${esc(report.exceeded_phase || "execution")})` : "Coverage (a workstream did not complete — the reason is named on its row)"}</div>
           ${report.coverage_detail.map(r => `<div class="finding"><strong>${esc(r.question_id)}</strong> — ${esc(r.status)} (${r.findings} finding(s))${r.reason ? ` — ${esc(r.reason)}` : ""}</div>`).join("")}
           ${report.approved_coverage ? `<div class="muted">This coverage is what the approving analyst approved.</div>` : ""}</div>` : ""}
-        ${report ? `<div class="md">${md(report.markdown)}</div>` : '<p class="muted">No report yet.</p>'}
+        ${report ? `<div class="md">${md(report.markdown)}</div>
+        <div style="margin-top:10px"><a href="/api/cases/${caseId}/report/html" target="_blank" rel="noopener">Print-ready HTML</a> · <a href="/api/cases/${caseId}/report/export" target="_blank" rel="noopener">JSON export</a> <span class="muted">— both render the same report model as the markdown above.</span></div>
+        <h3 style="margin-top:14px">Report section notes (${sectionNotes.length})</h3>
+        <p class="muted">Margin commentary on a section. Notes are not part of the report body in any format; they ride only in the JSON export's annotations field, and editing one never changes the report.</p>
+        ${sectionNotes.length ? sectionNotes.map(n => `<div class="finding"><strong>${esc(n.section)}</strong> · ${esc(n.analyst)} · ${esc(n.created_at)}${n.edited_at ? ` · edited ${esc(n.edited_at)}` : ""}<br>${esc(n.text)}<br><button class="secondary" data-snote-edit="${esc(n.note_id)}" style="padding:2px 8px;font-size:12px">Edit</button></div>`).join("") : '<p class="muted">No section notes yet.</p>'}
+        <div class="row">
+          <select id="snote-section">${(report.model && report.model.sections ? report.model.sections : []).map(s => `<option value="${esc(s.key)}">${esc(s.title)}</option>`).join("")}</select>
+          <input id="snote-text" type="text" placeholder="Note on this section" style="flex:1">
+          <button id="act-snote-add" class="secondary">Add section note</button>
+        </div>` : '<p class="muted">No report yet.</p>'}
       </div>
     </div>
     <div class="panel" style="margin-top:16px"><h3>Citation ledger ${ledger ? `(${ledger.entries.length} claims · verification: ${esc(ledger.verification.status)})` : ""}</h3>
@@ -425,6 +435,25 @@ async function openCase(caseId) {
     catch (e) { alert(e.message); }
     await refreshCases(); await openCase(caseId);
   });
+  const snoteBtn = $("#act-snote-add");
+  if (snoteBtn) snoteBtn.addEventListener("click", async () => {
+    const text = $("#snote-text").value.trim();
+    if (!text) { alert("The section note is empty."); return; }
+    snoteBtn.disabled = true;
+    try { await api(`/api/cases/${caseId}/report/notes`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({analyst: "Console Analyst", section: $("#snote-section").value, text})}); }
+    catch (e) { alert(e.message); }
+    await refreshCases(); await openCase(caseId);
+  });
+  document.querySelectorAll("[data-snote-edit]").forEach(btn => btn.addEventListener("click", async () => {
+    const current = await api(`/api/cases/${caseId}/report/notes`).catch(() => []);
+    const note = current.find(n => n.note_id === btn.dataset.snoteEdit);
+    if (!note) { alert("That note is no longer there."); return; }
+    const text = prompt("Edit the section note:", note.text);
+    if (text === null || !text.trim()) return;
+    try { await api(`/api/cases/${caseId}/report/notes/${note.note_id}`, {method: "PUT", headers: {"Content-Type": "application/json"}, body: JSON.stringify({analyst: "Console Analyst", text: text.trim()})}); }
+    catch (e) { alert(e.message); }
+    await refreshCases(); await openCase(caseId);
+  }));
   const amendBtn = $("#act-amend");
   if (amendBtn) amendBtn.addEventListener("click", async () => {
     const num = id => { const v = document.getElementById(id).value; return v === "" ? null : parseInt(v, 10); };
