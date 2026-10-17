@@ -198,12 +198,12 @@ def judge_promotion(candidate_runs: list[dict], baseline_runs: list[dict]) -> di
     }
 
 
-def _default_suite_runner(profile_id: str) -> dict:
+def _default_suite_runner(profile_id: str, profiles_dir=None) -> dict:
     # Imported lazily: evaluation imports the service, and the
     # service imports this module.
     from .evaluation import evaluate_suite
 
-    return evaluate_suite(profile_id)
+    return evaluate_suite(profile_id, profiles_dir)
 
 
 class ProfileGate:
@@ -219,7 +219,12 @@ class ProfileGate:
     def __init__(self, store: Store, profiles_dir=None, suite_runner=None):
         self.store = store
         self.profiles_dir = profiles_dir
-        self.suite_runner = suite_runner or _default_suite_runner
+        # The default runner grades in this gate's own profiles
+        # directory: a candidate that only exists there must be
+        # runnable there.
+        self.suite_runner = suite_runner or (
+            lambda profile_id: _default_suite_runner(profile_id, self.profiles_dir)
+        )
 
     # -- evidence lookup -----------------------------------------------------
     def _recorded_runs_for(

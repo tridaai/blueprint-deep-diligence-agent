@@ -59,13 +59,16 @@ def expected_conflict(fact_a: str, fact_b: str) -> dict | None:
     return None
 
 
-def evaluate_case(gold: dict, profile_id: str = "offline-stub") -> dict:
+def evaluate_case(
+    gold: dict, profile_id: str = "offline-stub", profiles_dir=None
+) -> dict:
     scratch = Path(tempfile.mkdtemp(prefix="deep-diligence-eval-"))
     settings = load_settings(
         sqlite_path=str(scratch / "diligence.db"),
         object_dir=str(scratch / "objects"),
         migrations_dir=str(REPO_ROOT / "migrations"),
         profile_id=profile_id,
+        profile_dir=str(profiles_dir) if profiles_dir else None,
     )
     service = CaseService(settings)
     case = service.create_case(BriefIn(**gold["brief"]))
@@ -238,14 +241,19 @@ def evaluate_case(gold: dict, profile_id: str = "offline-stub") -> dict:
     }
 
 
-def evaluate_suite(profile_id: str) -> dict:
+def evaluate_suite(profile_id: str, profiles_dir=None) -> dict:
     """One full pass over every pack under one profile.
 
     Returns the profile record, the full per-case results, and the
     slim per-case metrics the promotion gate aggregates by subset.
+    `profiles_dir` follows the service's PROFILE_DIR when the
+    profile under test lives outside the shipped directory.
     """
-    profile = load_profile(profile_id)
-    results = [evaluate_case(gold, profile_id=profile_id) for gold in ALL_CASES]
+    profile = load_profile(profile_id, profiles_dir)
+    results = [
+        evaluate_case(gold, profile_id=profile_id, profiles_dir=profiles_dir)
+        for gold in ALL_CASES
+    ]
     return {
         "profile": profile.record(),
         "results": results,
