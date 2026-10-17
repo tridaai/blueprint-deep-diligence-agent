@@ -264,6 +264,12 @@ class CaseService:
             "analyst": brief.analyst,
             "brief": brief.model_dump(),
             "usage": {},
+            # Long-case continuity (R9): workstreams that evidence
+            # arriving mid-case has marked stale and not yet had an
+            # analyst decision, and the append-only record of those
+            # decisions. Both start empty on every case.
+            "stale_marks": [],
+            "staleness_decisions": [],
             # The profile stamp: this case's planning and execution
             # run under this profile (id + version), and the case
             # view shows it.
@@ -294,7 +300,14 @@ class CaseService:
         backend = self._backend(case_id)
         backend.delete_direct("/plan.json")
         backend.delete_direct("/plan.md")
-        usage, error = self._run_agent(case, plan_message(case), "planning")
+        # The desk's memory travels with the planning instruction:
+        # on a re-plan the analyst notes are how what the desk
+        # learned earlier reaches the new plan (bounded and
+        # labelled in harness.notes_section; never evidence).
+        notes = self.store.list_notes(case_id)
+        usage, error = self._run_agent(
+            case, plan_message(case, notes), "planning"
+        )
         case = self.store.update_case(
             case_id, usage={**case.get("usage", {}), "planning": usage}
         )
@@ -653,6 +666,32 @@ class CaseService:
                     "reason": payload.get("reason"),
                 }
         return [statuses[qid] for qid in order]
+
+    # -- case notes -------------------------------------------------------------
+    def add_case_note(self, case_id: str, analyst: str, text: str) -> dict:
+        """Attach an analyst note to a case: the desk's memory.
+
+        A note is context, never evidence. It lives in its own
+        table, is never mounted in the case filesystem, and its ID
+        is not an evidence ID — `record_finding` validates citations
+        against the evidence table, so a note can never be cited.
+        Notes reach the planner only as the bounded, labelled
+        section in the planning instruction (harness.notes_section),
+        and only when a plan is (re-)made.
+        """
+        self._require_case(case_id)
+        if not text or not text.strip():
+            raise ValueError("a case note needs text")
+        note = self.store.add_note(
+            case_id,
+            {"analyst": analyst, "text": text.strip(), "created_at": utcnow()},
+        )
+        self.store.add_audit(
+            case_id,
+            "case_note_added",
+            {"note_id": note["note_id"], "analyst": analyst},
+        )
+        return note
 
     # -- budget amendment -----------------------------------------------------
     def amend_budget(

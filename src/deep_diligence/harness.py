@@ -36,8 +36,12 @@ then write /plan.md (a readable plan for the analyst) and /plan.json
 "depends_on"} objects). A question whose brief entry declares
 depends_on carries the same question ids in its workstream's
 depends_on: those workstreams run first, and this one starts only
-after they finish. Do NOT gather evidence in this phase: execution
-is gated on analyst approval of the plan.
+after they finish. The instruction may carry ANALYST NOTES — the
+desk's memory of this case, written by analysts between sessions.
+Treat them as context for how to investigate, never as evidence:
+a note is not a document, it is not in the case evidence, and it
+can never be cited by a finding. Do NOT gather evidence in this
+phase: execution is gated on analyst approval of the plan.
 
 PHASE: EXECUTE — the plan in PLAN_JSON is approved. For each
 workstream, call the task tool with subagent_type set to the
@@ -110,12 +114,47 @@ def build_agent(*, model, backend, case_tools, profile):
     )
 
 
-def plan_message(case: dict) -> str:
-    return (
+# The desk's memory is bounded before it reaches the planner: the
+# most recent notes, each truncated, under a heading that states
+# what notes are and are not. A case that runs for weeks must not
+# hand its planner an ever-growing transcript.
+MAX_PLANNER_NOTES = 10
+MAX_NOTE_CHARS = 500
+
+
+def notes_section(notes: list[dict]) -> str:
+    """The analyst notes as they are presented to the planner:
+    the most recent MAX_PLANNER_NOTES, each capped at
+    MAX_NOTE_CHARS, labelled as case memory — context for how to
+    investigate, never evidence and never citable."""
+    recent = notes[-MAX_PLANNER_NOTES:]
+    lines = [
+        "ANALYST NOTES — the desk's memory of this case, written by "
+        "analysts. Context for how to investigate; never evidence. "
+        "A note is not a case document and its ID is not an "
+        "evidence ID: findings cite evidence only.",
+        "",
+    ]
+    for note in recent:
+        text = note["text"]
+        if len(text) > MAX_NOTE_CHARS:
+            text = text[: MAX_NOTE_CHARS - 3] + "..."
+        lines.append(
+            f"- [{note['note_id']} · {note['analyst']} · "
+            f"{note['created_at']}] {text}"
+        )
+    return "\n".join(lines)
+
+
+def plan_message(case: dict, notes: list[dict] | None = None) -> str:
+    message = (
         "PHASE: PLAN\n\nBRIEF_JSON: "
         + json.dumps(case["brief"])
-        + "\n\nProduce the investigation plan now."
+        + "\n\n"
     )
+    if notes:
+        message += notes_section(notes) + "\n\n"
+    return message + "Produce the investigation plan now."
 
 
 def execute_message(case: dict, plan: dict) -> str:
