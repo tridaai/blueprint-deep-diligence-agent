@@ -22,6 +22,8 @@ class ObjectStore(Protocol):
     def put(self, key: str, data: bytes) -> None: ...
     def get(self, key: str) -> bytes: ...
     def exists(self, key: str) -> bool: ...
+    def delete(self, key: str) -> None: ...
+    def list_keys(self, prefix: str) -> list[str]: ...
     def ping(self) -> bool: ...
 
 
@@ -46,6 +48,19 @@ class LocalObjectStore:
 
     def exists(self, key: str) -> bool:
         return self._path(key).is_file()
+
+    def delete(self, key: str) -> None:
+        self._path(key).unlink(missing_ok=True)
+
+    def list_keys(self, prefix: str) -> list[str]:
+        base = self.root / prefix
+        if not base.is_dir():
+            return []
+        return sorted(
+            str(p.relative_to(self.root))
+            for p in base.rglob("*")
+            if p.is_file()
+        )
 
     def ping(self) -> bool:
         return self.root.is_dir()
@@ -87,6 +102,16 @@ class S3ObjectStore:
             return True
         except ClientError:
             return False
+
+    def delete(self, key: str) -> None:
+        self.client.delete_object(Bucket=self.bucket, Key=key)
+
+    def list_keys(self, prefix: str) -> list[str]:
+        keys: list[str] = []
+        paginator = self.client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+            keys.extend(obj["Key"] for obj in page.get("Contents", []))
+        return sorted(keys)
 
     def ping(self) -> bool:
         try:

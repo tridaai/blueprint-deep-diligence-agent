@@ -680,6 +680,193 @@ class Store:
         )
         return [json.loads(r["payload"]) for r in rows]
 
+    def update_evidence(self, case_id: str, ev: dict) -> dict:
+        self._execute(
+            "UPDATE evidence SET sha256 = ?, payload = ?"
+            " WHERE case_id = ? AND evidence_id = ?",
+            (ev["sha256"], json.dumps(ev), case_id, ev["evidence_id"]),
+        )
+        return ev
+
+    # -- source registry ----------------------------------------------------
+    # The governed registry of sources (governance.py seeds it from
+    # the corpus and owns its semantics). One row per source name;
+    # the record carries its own act history, so registration is a
+    # recorded act in the record itself, not a config edit.
+    def add_source(self, record: dict) -> dict:
+        self._execute(
+            "INSERT INTO sources (name, payload, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?)",
+            (
+                record["name"],
+                json.dumps(record),
+                record["registered_at"],
+                record["registered_at"],
+            ),
+        )
+        return record
+
+    def get_source(self, name: str) -> dict | None:
+        row = self._fetchone(
+            "SELECT payload FROM sources WHERE name = ?", (name,)
+        )
+        return json.loads(row["payload"]) if row else None
+
+    def list_sources(self) -> list[dict]:
+        rows = self._fetchall("SELECT payload FROM sources ORDER BY name")
+        return [json.loads(r["payload"]) for r in rows]
+
+    def update_source(self, record: dict) -> dict:
+        self._execute(
+            "UPDATE sources SET payload = ?, updated_at = ? WHERE name = ?",
+            (json.dumps(record), utcnow(), record["name"]),
+        )
+        return record
+
+    # -- redactions -----------------------------------------------------------
+    # A redaction record keeps the original content hash, the
+    # reason, and the analyst — never the content. Flags are the
+    # live report's claims that cite redacted evidence; they carry
+    # the analyst's acknowledgement or send-back decision.
+    def add_redaction(self, case_id: str, record: dict) -> dict:
+        with self._lock:
+            row = self._fetchone(
+                "SELECT COUNT(*) AS n FROM redactions WHERE case_id = ?",
+                (case_id,),
+            )
+            record = {
+                **record,
+                "redaction_id": f"RED-{int(row['n']) + 1:04d}",
+                "case_id": case_id,
+            }
+            self._conn.execute(
+                self._sql(
+                    "INSERT INTO redactions"
+                    " (redaction_id, case_id, evidence_id, payload, created_at)"
+                    " VALUES (?, ?, ?, ?, ?)"
+                ),
+                (
+                    record["redaction_id"],
+                    case_id,
+                    record["evidence_id"],
+                    json.dumps(record),
+                    record["redacted_at"],
+                ),
+            )
+            self._conn.commit()
+            return record
+
+    def list_redactions(self, case_id: str) -> list[dict]:
+        rows = self._fetchall(
+            "SELECT payload FROM redactions WHERE case_id = ?"
+            " ORDER BY redaction_id",
+            (case_id,),
+        )
+        return [json.loads(r["payload"]) for r in rows]
+
+    def add_redaction_flag(self, case_id: str, flag: dict) -> dict:
+        with self._lock:
+            row = self._fetchone(
+                "SELECT COUNT(*) AS n FROM redaction_flags WHERE case_id = ?",
+                (case_id,),
+            )
+            flag = {
+                **flag,
+                "flag_id": f"FLAG-{int(row['n']) + 1:04d}",
+                "case_id": case_id,
+            }
+            self._conn.execute(
+                self._sql(
+                    "INSERT INTO redaction_flags"
+                    " (flag_id, case_id, claim_id, status, payload, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?)"
+                ),
+                (
+                    flag["flag_id"],
+                    case_id,
+                    flag["claim_id"],
+                    flag["status"],
+                    json.dumps(flag),
+                    flag["created_at"],
+                ),
+            )
+            self._conn.commit()
+            return flag
+
+    def list_redaction_flags(self, case_id: str) -> list[dict]:
+        rows = self._fetchall(
+            "SELECT payload FROM redaction_flags WHERE case_id = ?"
+            " ORDER BY flag_id",
+            (case_id,),
+        )
+        return [json.loads(r["payload"]) for r in rows]
+
+    def get_redaction_flag(self, case_id: str, flag_id: str) -> dict | None:
+        row = self._fetchone(
+            "SELECT payload FROM redaction_flags"
+            " WHERE case_id = ? AND flag_id = ?",
+            (case_id, flag_id),
+        )
+        return json.loads(row["payload"]) if row else None
+
+    def update_redaction_flag(self, case_id: str, flag: dict) -> dict:
+        self._execute(
+            "UPDATE redaction_flags SET status = ?, payload = ?"
+            " WHERE case_id = ? AND flag_id = ?",
+            (flag["status"], json.dumps(flag), case_id, flag["flag_id"]),
+        )
+        return flag
+
+    # -- case tombstones -------------------------------------------------------
+    # All that survives a case deletion: the minimal record that
+    # the case existed and was ended, by whom, why, and when, plus
+    # the hash of the final report it carried, if it carried one.
+    def add_tombstone(self, tombstone: dict) -> dict:
+        self._execute(
+            "INSERT INTO case_tombstones (case_id, subject, payload, deleted_at)"
+            " VALUES (?, ?, ?, ?)",
+            (
+                tombstone["case_id"],
+                tombstone["subject"],
+                json.dumps(tombstone),
+                tombstone["deleted_at"],
+            ),
+        )
+        return tombstone
+
+    def get_tombstone(self, case_id: str) -> dict | None:
+        row = self._fetchone(
+            "SELECT payload FROM case_tombstones WHERE case_id = ?",
+            (case_id,),
+        )
+        return json.loads(row["payload"]) if row else None
+
+    def list_tombstones(self) -> list[dict]:
+        rows = self._fetchall(
+            "SELECT payload FROM case_tombstones ORDER BY deleted_at"
+        )
+        return [json.loads(r["payload"]) for r in rows]
+
+    def delete_case_data(self, case_id: str) -> None:
+        # Every case-scoped table, in one locked step: a deletion
+        # that fails halfway must not leave a half-case behind. The
+        # tombstone is written by the caller, outside this sweep —
+        # it is the one record that survives.
+        tables = (
+            "cases", "plans", "evidence", "findings", "reports",
+            "citation_ledger", "verifier_reports", "quarantine",
+            "conflicts", "case_files", "execution_checkpoints",
+            "case_notes", "report_snapshots", "redactions",
+            "redaction_flags", "audit",
+        )
+        with self._lock:
+            for table in tables:
+                self._conn.execute(
+                    self._sql(f"DELETE FROM {table} WHERE case_id = ?"),
+                    (case_id,),
+                )
+            self._conn.commit()
+
     # -- audit ------------------------------------------------------------------
     def add_audit(self, case_id: str, event: str, payload: dict | None = None) -> None:
         self._execute(

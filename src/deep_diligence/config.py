@@ -44,6 +44,10 @@ class Settings:
     # and validated at service startup; a bad profile refuses startup.
     profile_id: str = "offline-stub"
     profile_dir: str | None = None
+    # Source governance: how long a standard-retention case is
+    # kept before the retention sweep lists it for an analyst's
+    # decision (RETENTION_DAYS). The sweep lists; it never deletes.
+    retention_days: int = 365
 
     @property
     def store_backend(self) -> str:
@@ -77,6 +81,7 @@ def load_settings(**overrides) -> Settings:
         api_key=env.get("API_KEY") or None,
         profile_id=env.get("PROFILE_ID") or "offline-stub",
         profile_dir=env.get("PROFILE_DIR") or None,
+        retention_days=int(env.get("RETENTION_DAYS") or 365),
     )
     values.update({k: v for k, v in overrides.items() if v is not None})
     return Settings(**values)
