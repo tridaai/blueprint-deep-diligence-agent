@@ -197,6 +197,26 @@ is accountable for lives in our code around it:
   under every profile. The model itself is injected separately, so
   a profile can be run and evaluated with the offline stub standing
   in for its target.
+- **Profile regression gate.** A profile replaces the active one
+  only by passing evals, as a recorded decision. The packs are
+  split in the eval data into a **tuning** subset and a **held-out**
+  subset. A promotion evaluation runs the candidate's full suite
+  three times and reads the worst run: tuning recall must match
+  the incumbent's recorded baseline, held-out recall must stay
+  within 0.02 of it, and the zero-tolerance lines (unsupported
+  claims 0, citation and correctness 1.000) must hold on both
+  subsets, every run. The evaluation snapshots the candidate
+  file's SHA-256 — edit the file afterwards and the evidence no
+  longer matches, so promotion is refused. Promotions and
+  rollbacks are append-only records naming the analyst; the
+  active profile is whatever the newest record says, and
+  `PROFILE_ID` is only the bootstrap default. The shipped
+  controls prove the gate discriminates: `openai-gpt` comes back
+  **NOT_PROMOTABLE** (tuning recall 0.750 and held-out 0.812
+  against a 1.000 baseline, on every run), while a copy of the
+  incumbent under a new id passes and completes a promotion +
+  rollback cycle (`python evals/promotion_controls.py` runs both,
+  for real).
 - **Audit trail.** Case creation, evidence ingestion, plan versions
   and decisions, every sub-agent spawn, budget events, composition,
   and report decisions are recorded per case and visible in the
@@ -249,11 +269,12 @@ preliminary release) — and no other conflicts. The budget case
 exhausts on its step cap during execution, refuses a
 below-consumption amendment, and after amendment re-runs to
 DRAFT_READY with recall **1.000**. The pytest suite
-(93 tests) covers the gates, the budget caps, the evidence backend,
+(111 tests) covers the gates, the budget caps, the evidence backend,
 the citation rules, the ledger's drift gate, the verifier and
 quarantine, conflict detection and handling, per-phase budgets,
-the budget ledger, the partial-report protocol, amendment, and
-the harness profiles separately.
+the budget ledger, the partial-report protocol, amendment, the
+harness profiles, and the profile regression gate — including its
+two controls run against the real suite (below).
 
 The eval runner also runs the packs under any other profile —
 `python evals/run_evals.py --profile openai-gpt` — with the report
@@ -265,7 +286,16 @@ market-scan has no document reader, so the market questions come
 back empty — the cost of that tuning choice, in its own column,
 while citation completeness and the zero-unsupported-claims line
 hold. (The citation-integrity pack, whose questions are financial
-and product, still scores 1.000.)
+and product, still scores 1.000.) The runner also reports the two
+eval subsets separately — tuning (Helvion + Copperline, 24 gold
+facts) and held-out (Selene + the integrity pack, 16 gold facts) —
+because the profile regression gate judges candidates on them:
+run through the gate, `openai-gpt` is **NOT_PROMOTABLE** with
+worst-run recalls of 0.750 (tuning) and 0.812 (held-out) against
+the incumbent's 1.000 baseline, while a behavioural copy of the
+incumbent is PROMOTABLE and cycles through promotion and
+rollback. `python evals/promotion_controls.py` reproduces both
+controls end to end.
 
 ## Production profile
 
@@ -292,10 +322,13 @@ development profile needs none of it: SQLite at `./data/diligence.db`
   lexicon in `conflicts.py`: a disagreement stated without a
   recognised metric, figure, or comparable value will sit in the
   report as two findings and not be flagged. Harness profiles are
-  live as configuration, but *promoting* one — letting a tuned
-  profile replace the default on eval evidence, held-out cases
-  included — is a later round; nothing here auto-promotes. A
-  profile's tool allowlist governs this blueprint's case tools; the
+  live as configuration, and one replaces the active profile only
+  through the regression gate's recorded promotion — nothing here
+  auto-promotes, and the gate's baseline is the incumbent's own
+  recorded runs, so a store whose profiles were never evaluated
+  pays for a fresh baseline (three more suite runs) on its first
+  promotion evaluation. A profile's tool allowlist governs this
+  blueprint's case tools; the
   harness's built-in filesystem tools are its own scaffolding and
   are not a profile's to grant or withhold. The verifier checks
   figures, dates, and named entities against cited text — it does
@@ -315,6 +348,11 @@ src/deep_diligence/
   harness.py      create_deep_agent wiring, built from the profile
   profiles.py     harness profiles: the strict loader, prompt
                   assembly, and the middleware the switches control
+  evaluation.py   the case-pack grading, shared by the eval runner
+                  and the promotion gate (one ruler for both)
+  promotion.py    the profile regression gate: split evaluation,
+                  worst-of-three verdicts, the promotion and
+                  rollback records that move the active profile
   stub_model.py   the deterministic offline model
   llm.py          provider boundary (OpenAI-compatible, Anthropic, Ollama)
   budgets.py      budget guard enforced in code around the harness
@@ -338,7 +376,9 @@ src/deep_diligence/
 profiles/         the harness profile artifacts (offline-stub,
                   openai-gpt), versioned JSON, strictly validated
 migrations/       numbered SQL migrations (+ sqlite/ variants)
-evals/            the gold case-pack gate (--profile for per-profile runs)
+evals/            the gold case-pack gate (--profile for per-profile
+                  runs) and promotion_controls.py, the gate's two
+                  controls run for real
 tests/            the pytest suite
 docs/             architecture notes
 ```

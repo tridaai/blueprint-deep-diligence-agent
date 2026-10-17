@@ -25,6 +25,8 @@ it, so they hold for any model the harness runs.
 | Harness wiring | `harness.py` | `create_deep_agent` built from the active profile: assembled prompts, per-role tools, the profile's roster |
 | Prompts | `harness.py`, `profiles/` | Canonical prompt texts in `harness.py`; the shipped offline profile mirrors them section for section (a test pins the two together) |
 | Profiles | `profiles.py`, `profiles/*.json` | Harness profile artifacts: strict fail-closed loader, prompt assembly from named sections, middleware the switches control |
+| Evaluation | `evaluation.py` | The case-pack grading (recall, citation, correctness, quarantine, conflicts), shared by the eval runner and the promotion gate |
+| Promotion gate | `promotion.py` | Split evaluation, worst-of-three verdicts against the incumbent's recorded baseline, file-hash evidence, append-only promotion/rollback records |
 | Budgets | `budgets.py` | Callback guard + budget ledger: per-phase step/token caps, case-level spawn/wall caps, grant/consume/exhaust/amend entries folded from the audit trail |
 | Tools | `tools.py` | `search_corpus`, `read_document`, `record_finding` (citation rule) |
 | Backend | `backend.py` | Deep Agents filesystem protocol over the evidence store |
@@ -231,8 +233,10 @@ middleware switches (`context_compression`,
 `large_result_offloading`, `offload_threshold_chars`).
 
 **Selection and recording.** `PROFILE_ID` (default `offline-stub`)
-names the active artifact; the service loads it once at startup
-and stamps its id + version + target onto every case record, onto
+names the bootstrap artifact; once a promotion is recorded, the
+newest promotion record names the active one instead (see the
+regression gate, below). The service resolves the active profile
+at startup and stamps its id + version + target onto every case record, onto
 the `case_created` audit entry, and onto each phase's
 `budget_granted` entry — planning and execution are both attributed
 to the profile that ran them, in the case view, the console, and
@@ -274,10 +278,8 @@ drops `read_document` — it works from search results only. Run
 under the eval packs with the stub standing in, its gold-pack
 recall falls to 0.700–0.769 while citation discipline holds: the
 tuning's cost, attributed to the profile that caused it. Whether
-such a profile may replace the default is a promotion decision
-bound to the eval gate — a later round; this round only builds the
-artifacts, the loader, the recording, and the per-profile runs
-(`evals/run_evals.py --profile <id>`).
+such a profile may replace the default is decided by the profile
+regression gate, next.
 
 **Why not the package's own profiles.** `deepagents` resolves its
 internal `HarnessProfile` from the model's identity through a
@@ -288,6 +290,79 @@ would let one service's tuning leak into another's. The blueprint
 therefore keeps its own artifacts and applies them through the
 public seams above.
 
+## Profile regression gate
+
+The gate (`promotion.py`) is how a profile stops being an artifact
+someone configured and becomes the profile production runs. It is
+a workflow over append-only records, not a setting.
+
+**The split.** The eval packs are partitioned in the eval data
+(`corpus.py`, `PACK_SPLITS`) — Helvion and Copperline are the
+TUNING subset, Selene and the citation-integrity pack are
+HELD-OUT. The split is read off the case records; no run chooses
+it. The integrity pack is held out on purpose: its stale-figure
+trap and poisoned findings are the behaviour a promotion must not
+be able to rehearse against.
+
+**The evaluation.** Judging a candidate takes `PROMOTION_RUNS`
+(3) full suite passes, because model behaviour is stochastic;
+every run's per-subset metrics are recorded, and the verdict reads
+the worst run. The bar is the incumbent's own recorded baseline —
+the worst of the incumbent's recorded runs, per subset. Recorded
+baseline runs are reused while the incumbent's file hash still
+matches them; a first evaluation on a fresh store pays for the
+baseline runs itself. The grading is `evaluation.evaluate_suite`,
+the same code the eval runner gates on.
+
+**The rule.** On every candidate run: tuning recall ≥ the
+baseline bar (no tolerance — the tuning cases are the ones the
+author iterated against); held-out recall ≥ the bar minus
+`HELD_OUT_TOLERANCE` (0.02); and the zero-tolerance lines hold on
+both subsets — unsupported claims in final reports = 0, citation
+completeness = 1.000, citation correctness = 1.000. Any failure
+makes the evaluation NOT_PROMOTABLE, with each failure naming the
+run, subset, rule, and the observed vs required numbers.
+
+**The evidence.** An evaluation record carries the candidate's
+id + version, the incumbent it was judged against, all runs, the
+baseline and its source, the verdict — and the candidate profile
+file's SHA-256 at evaluation time. At promotion, the file is
+hashed again: a mismatch refuses the promotion, because the
+evidence no longer describes the file. An evaluation judged
+against a profile that is no longer the incumbent is likewise
+stale and refused.
+
+**The decision.** Promotions live in `profile_promotions`
+(migration 0005), append-only like the evaluations; the store
+offers no update or delete for either table. The active profile
+is resolved at startup from the newest promotion record, and a
+live promotion moves the pointer for new cases only — existing
+cases keep their stamp. `PROFILE_ID` is the bootstrap default for
+a store with no promotions. There is no code path that sets the
+active profile directly: the service exposes evaluate, promote,
+and rollback, and the API and console surface exactly those.
+
+**Rollback.** Rolling back promotes the previous profile again,
+as its own record naming the record it reverses. It is judged, not
+rubber-stamped: the restored profile's recorded runs (found in
+the evaluation history, as that evaluation's candidate or its
+baseline, hash-checked against the file as it stands) must pass
+the same rule against the current incumbent's recorded runs. A
+profile whose file changed since its runs were recorded cannot
+be rolled back to — it must be evaluated as a candidate instead.
+
+**The controls.** Two controls run against the real suite, in
+`tests/test_promotion.py` and standalone as
+`evals/promotion_controls.py`. NEGATIVE: `openai-gpt` against
+`offline-stub` returns NOT_PROMOTABLE on all three runs — tuning
+recall 0.750 and held-out 0.812 against a 1.000 baseline, failing
+both recall rules, its zero-tolerance lines intact. POSITIVE: a
+copy of the incumbent under a new id and version (identical in
+every behavioural field) returns PROMOTABLE and completes a
+promotion + rollback cycle. A third control tampers with a
+candidate file after evaluation and shows promotion refused on
+the hash check.
+
 ## Deliberate limits of this round
 
 - Harness profiles shape this blueprint's own seams — prompts,
@@ -297,8 +372,20 @@ public seams above.
   likewise the middleware switches act on the assembled stacks
   through the caller-middleware merge, not on the package's
   internal per-model profile registry, which this blueprint
-  deliberately does not use. Profile *promotion* (eval-bound,
-  held-out cases, snapshot and rollback) is a later round.
+  deliberately does not use.
+- The regression gate grades on the deterministic stub over the
+  offline corpus, like every gate in this blueprint: it proves the
+  promotion discipline and measures profile behaviour under the
+  stub standing in. A promotion decision for a live deployment
+  should rest on a live-mode evaluation of the same packs (the
+  runner's per-profile mode is the same ruler pointed at a real
+  model), and the gate's records say which model produced the
+  evidence they hold.
+- A rollback rests on recorded runs only. If the previous
+  profile's file was edited after its runs were recorded, the hash
+  check finds no evidence for the file as it stands and the gate
+  refuses the rollback — the profile re-enters as a candidate
+  through a fresh evaluation instead.
 - Conflict detection is only as wide as the governed metric
   lexicon: a disagreement stated without a recognised metric,
   figure, or comparable value sits in the report as two findings and
