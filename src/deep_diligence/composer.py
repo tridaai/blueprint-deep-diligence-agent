@@ -42,6 +42,17 @@ and their source labels. The section is generated from the records,
 never hand-written, and a conflict the analyst has marked NOTED
 renders with its note — it is never removed.
 
+`apply_conflicts` is also the finalize step (report_model.py): it
+builds the report's structured model — executive summary composed
+from the supported claims under the summary-integrity check,
+per-question support grades, risks and open items generated from
+the case's records — and renders all three formats from that one
+model: this markdown, a self-contained print-ready HTML page, and
+the JSON export. Later re-renders (a conflict noted, staleness
+proceeded on, a quarantined claim dropped, a redaction flag
+acknowledged) pass through the same step, so the model and its
+renderings always describe the records as they now stand.
+
 The Method and limits section also carries the case's staleness
 decisions (continuity.py): when evidence arrived after planning
 and an analyst proceeded without re-planning, or re-planned around
@@ -54,6 +65,7 @@ from __future__ import annotations
 
 from .ledger import build_ledger
 from .objects import ObjectStore
+from .report_model import build_report_model, render_html, staleness_lines
 from .store import Store, utcnow
 
 
@@ -123,6 +135,107 @@ def coverage_detail_for(
     return question_coverage(brief, claims, interrupted_questions, statuses)
 
 
+def _summary_lines(summary: dict) -> list[str]:
+    counts = summary["counts"]
+    lines = [
+        "## Executive summary",
+        "",
+        f"Supported claims: {counts['claims_supported']} · "
+        f"Quarantined claims: {counts['claims_quarantined']} · "
+        f"Conflicts open: {counts['conflicts_open']} · "
+        f"Conflicts noted: {counts['conflicts_noted']} · "
+        f"Questions not covered: {counts['questions_uncovered']} · "
+        f"Questions partial: {counts['questions_partial']}",
+        "",
+    ]
+    if summary["sentences"]:
+        lines += [f"- {sentence}" for sentence in summary["sentences"]]
+    elif counts["claims_supported"]:
+        lines.append(
+            "_Every summary sentence failed the integrity check "
+            "against the supported claims and was dropped; the drops "
+            "are recorded on the report record._"
+        )
+    else:
+        lines.append(
+            "_No findings survived verification; the summary has "
+            "nothing to summarise._"
+        )
+    lines.append("")
+    return lines
+
+
+def _open_items_lines(items: dict) -> list[str]:
+    if items["empty"]:
+        return [
+            "None recorded: no open or noted conflicts, no quarantined "
+            "claims, no uncovered or partial questions, no staleness "
+            "proceeded on, and no redaction flags.",
+            "",
+        ]
+    lines: list[str] = []
+    if items["conflicts"]:
+        lines += ["### Conflicts", ""]
+        for record in items["conflicts"]:
+            period = record["period"] if record["period"] else "no period stated"
+            line = (
+                f"- {record['conflict_id']} — {record['metric']} · "
+                f"{period}: {' vs '.join(record['values'])} "
+                f"({record['status']}"
+            )
+            if record["status"] == "NOTED":
+                line += f" by {record['noted_by']}: \"{record['note']}\""
+            lines.append(line + ")")
+        lines.append("")
+    if items["quarantined"]:
+        lines += ["### Quarantined claims", ""]
+        for record in items["quarantined"]:
+            line = (
+                f"- {record['claim_id']} ({record['question_id']}) — "
+                f"{record['reason']}; status {record['status']}"
+            )
+            if record["decided_by"]:
+                line += f", decided by {record['decided_by']}"
+            lines.append(line)
+        lines.append("")
+    if items["coverage_gaps"]:
+        lines += ["### Coverage gaps", ""]
+        for row in items["coverage_gaps"]:
+            line = (
+                f"- {row['question_id']} — {row['status']} "
+                f"({row['findings']} finding(s) in this report)"
+            )
+            if row.get("reason"):
+                line += f" — {row['reason']}"
+            lines.append(line)
+        lines.append("")
+    if items["staleness_proceeds"]:
+        lines += ["### Staleness proceeded on", ""]
+        for decision in items["staleness_proceeds"]:
+            line = (
+                f"- Evidence {', '.join(decision['evidence_ids'])}; "
+                f"questions {', '.join(decision['questions'])} — "
+                f"proceeded by {decision['analyst']} on "
+                f"{(decision['at'] or '')[:10]}"
+            )
+            if decision["note"]:
+                line += f": \"{decision['note']}\""
+            lines.append(line)
+        lines.append("")
+    if items["redaction_flags"]:
+        lines += ["### Redaction flags", ""]
+        for flag in items["redaction_flags"]:
+            line = (
+                f"- {flag['claim_id']} cites {flag['evidence_id']} — "
+                f"{flag['status']}"
+            )
+            if flag["decided_by"]:
+                line += f" by {flag['decided_by']}"
+            lines.append(line)
+        lines.append("")
+    return lines
+
+
 def _render_markdown(
     case: dict,
     claims: list[dict],
@@ -137,6 +250,9 @@ def _render_markdown(
     verification: dict | None = None,
     conflicts: list[dict] | None = None,
     staleness_decisions: list[dict] | None = None,
+    summary: dict | None = None,
+    grades: dict | None = None,
+    open_items: dict | None = None,
 ) -> str:
     brief = case["brief"]
     lines = [
@@ -147,6 +263,8 @@ def _render_markdown(
         f"Evidence in scope: {evidence_count} documents.",
         "",
     ]
+    if summary is not None:
+        lines += _summary_lines(summary)
     if partial:
         lines += [
             "> **Partial report.** The run stopped on its "
@@ -175,7 +293,10 @@ def _render_markdown(
             lines.append(line)
         lines.append("")
     for question in brief["questions"]:
-        lines += [f"## {question['id']} — {question['text']}", ""]
+        header = f"## {question['id']} — {question['text']}"
+        if grades and question["id"] in grades:
+            header += f" · support: {grades[question['id']]}"
+        lines += [header, ""]
         q_claims = [c for c in claims if c["question_id"] == question["id"]]
         if not q_claims:
             lines += ["_No findings recorded for this question._", ""]
@@ -273,6 +394,9 @@ def _render_markdown(
                 "into the report."
             )
         lines.append(summary)
+    if open_items is not None:
+        lines += ["", "## Risks and open items", ""]
+        lines += _open_items_lines(open_items)
     lines += [
         "",
         "## Method and limits",
@@ -288,29 +412,7 @@ def _render_markdown(
             "composition because their evidence citations did not "
             "resolve: " + ", ".join(refused) + "."
         )
-    for decision in staleness_decisions or []:
-        evidence_ids = ", ".join(decision["evidence_ids"])
-        questions = ", ".join(decision["questions"])
-        day = (decision.get("at") or "")[:10]
-        if decision["action"] == "proceed":
-            lines.append(
-                f"New evidence arrived after planning ({evidence_ids}); "
-                f"the desk marked {questions} stale, and "
-                f"{decision['analyst']} recorded a decision to proceed "
-                f"without re-planning on {day}"
-                + (f': "{decision["note"]}"' if decision.get("note") else "")
-                + ". Those workstreams were not re-run; their findings "
-                "predate the new evidence."
-            )
-        else:
-            lines.append(
-                f"New evidence arrived after planning ({evidence_ids}); "
-                f"the desk marked {questions} stale and re-planned on "
-                f"{day} (analyst {decision['analyst']}). The marked "
-                "workstreams were re-run against the full evidence; "
-                "the others kept their findings, which rest on "
-                "evidence the arrival did not touch."
-            )
+    lines += staleness_lines(staleness_decisions)
     return "\n".join(lines) + "\n"
 
 
@@ -509,20 +611,28 @@ def apply_conflicts(
     report: dict,
     conflict_records: list[dict],
 ) -> dict:
-    """Re-render a verified draft with its Conflicts section.
+    """Finalize a verified draft: its Conflicts section, its
+    structured model, and every format rendered from that model.
 
-    The section is generated from the conflict records, so the
-    report the analyst reads and the stored records cannot drift
-    apart. Called once after conflict detection, and again whenever
-    a conflict is marked NOTED, so the note renders into the draft
-    and stays there. Claims, coverage, verification, and the
-    citation ledger are unchanged — conflicts annotate the report,
-    they do not alter its claims.
+    The Conflicts section is generated from the conflict records,
+    so the report the analyst reads and the stored records cannot
+    drift apart. Called once after conflict detection, and again
+    whenever a later decision changes what the report must show —
+    a conflict marked NOTED, staleness proceeded on, a quarantined
+    claim dropped, a redaction flag acknowledged — so the note and
+    the decision render into the draft and stay there. Claims,
+    coverage, verification, and the citation ledger are unchanged
+    by this step: it assembles the model (report_model.py) from
+    the records as they stand and renders the markdown, the
+    print-ready HTML, and the stored model the JSON export serves
+    — one model, three formats, nothing assembled twice.
     """
     case_id = case["case_id"]
     claims = report["claims"]
     entries = build_ledger(store, objects, case_id, claims)
     evidence_count = store.count_evidence(case_id)
+    model = build_report_model(store, case, report, entries, conflict_records)
+    grades = {q["question_id"]: q["grade"] for q in model["questions"]}
     report = {
         **report,
         "markdown": _render_markdown(
@@ -538,6 +648,9 @@ def apply_conflicts(
             verification=report["verification"],
             conflicts=conflict_records,
             staleness_decisions=case.get("staleness_decisions"),
+            summary=model["executive_summary"],
+            grades=grades,
+            open_items=model["risks_and_open_items"],
         ),
         "conflicts": [
             {
@@ -550,5 +663,7 @@ def apply_conflicts(
             }
             for r in conflict_records
         ],
+        "model": model,
+        "html": render_html(model),
     }
     return store.save_report(case_id, report)
