@@ -18,6 +18,7 @@ import json
 import logging
 import re
 import uuid
+from decimal import Decimal
 
 from langchain_core.messages import HumanMessage
 
@@ -33,6 +34,7 @@ from .budgets import (
 from .composer import apply_conflicts, apply_verification, compose_report
 from .conflicts import detect_conflicts
 from .config import Settings
+from .costs import cost_view, fold_cost_ledger, load_price_table, price_usage_records
 from .continuity import stale_questions
 from .corpus import companies
 from .evidence import add_evidence_document, ingest_case_evidence
@@ -49,7 +51,7 @@ from .governance import (
 )
 from .harness import build_agent, execute_message, plan_message
 from .ledger import verify_ledger
-from .llm import build_model
+from .llm import build_model, model_label
 from .models import PRIORITIES, BudgetIn, BriefIn
 from .objects import ObjectStore, build_object_store, sha256_hex
 from .profiles import ProfileError, load_profile
@@ -107,6 +109,11 @@ class CaseService:
         # fallback). The model is injected separately by the provider
         # boundary; the profile is configuration.
         self.store: Store = build_store(settings)
+        # The governed price table loads with the same fail-closed
+        # discipline as the harness profile: a table that cannot
+        # load refuses the startup, because a run priced against a
+        # silent fallback would be a cost ledger nobody governed.
+        self.price_table = load_price_table(settings.pricing_dir)
         # The source registry is seeded from the corpus before any
         # case work: evidence ingestion refuses unregistered
         # sources, and the corpus is the desk's standing universe,
@@ -243,6 +250,13 @@ class CaseService:
             phase=phase,
             prior_subagents=consumed["subagents"],
             prior_wall_seconds=consumed["wall_seconds"],
+            # Cost attribution: the model this run is priced
+            # under, and — on the offline backend — the flag that
+            # marks its usage figures as the stub's declared
+            # per-call numbers (estimates), never as measured
+            # provider usage.
+            model=model_label(self.settings),
+            usage_declared=self.settings.llm_backend == "offline",
         )
         config = {
             "callbacks": [guard],
@@ -261,6 +275,26 @@ class CaseService:
             failure = exc
         self._flush_audit(case_id, sink)
         usage = guard.usage()
+        # The run's cost, priced now — at the end of the run, under
+        # the price table as it stands today — and recorded as a
+        # ledger entry beside the consumption checkpoint. Each
+        # priced line carries the table version and rates it was
+        # computed with, so the recorded ledger stands whatever
+        # the table later becomes (costs.fold_cost_ledger reads
+        # only these entries, never the current table).
+        cost_lines = price_usage_records(
+            usage.get("model_records") or [], self.price_table
+        )
+        if cost_lines:
+            self.store.add_audit(
+                case_id,
+                "cost_recorded",
+                {
+                    "phase": phase,
+                    "price_table": self.price_table.record(),
+                    "lines": cost_lines,
+                },
+            )
         self.store.add_audit(
             case_id, "budget_consumed", {"phase": phase, "usage": usage}
         )
@@ -1885,6 +1919,64 @@ class CaseService:
             "case %s budget amended by %s: %s", case_id, analyst, reason
         )
         return self.store.update_case(case_id, brief=brief, status="APPROVED")
+
+    # -- cost accounting --------------------------------------------------------
+    def cost_report(self, case_id: str) -> dict:
+        """One case's budget-vs-actual report: the budget ledger's
+        granted-vs-consumed picture joined with the cost ledger —
+        what the case cost, by phase, by sub-agent role, and by
+        model, folded from the priced lines recorded when each run
+        ended (see costs.py). Reading a report prices nothing: the
+        figures are the recorded ones."""
+        case = self._require_case(case_id)
+        return cost_view(
+            case, self.store.list_audit(case_id), self.price_table
+        )
+
+    def cost_totals(self) -> dict:
+        """Every case's recorded cost, summed — a totals view over
+        the per-case ledgers, computed by folding each case's own
+        ledger and adding the folds. Each case still owns its
+        detail at its own cost report; this is the desk's total
+        spend line and the per-case figures it is made of, nothing
+        more (portfolio comparison is a later round's work)."""
+        cases: list[dict] = []
+        total_cost = Decimal(0)
+        total_tokens = 0
+        total_calls = 0
+        contains_estimates = False
+        for case in self.store.list_cases():
+            fold = fold_cost_ledger(self.store.list_audit(case["case_id"]))
+            totals = fold["totals"]
+            total_cost += totals["cost_usd"]
+            total_tokens += totals["total_tokens"]
+            total_calls += totals["calls"]
+            contains_estimates = (
+                contains_estimates or fold["contains_estimates"]
+            )
+            cases.append(
+                {
+                    "case_id": case["case_id"],
+                    "subject": case["subject"],
+                    "status": case["status"],
+                    "calls": totals["calls"],
+                    "total_tokens": totals["total_tokens"],
+                    "cost_usd": float(totals["cost_usd"]),
+                    "contains_estimates": fold["contains_estimates"],
+                    "has_unpriced": fold["has_unpriced"],
+                }
+            )
+        return {
+            "currency": self.price_table.currency,
+            "cases": cases,
+            "totals": {
+                "cases": len(cases),
+                "calls": total_calls,
+                "total_tokens": total_tokens,
+                "cost_usd": float(total_cost),
+            },
+            "contains_estimates": contains_estimates,
+        }
 
     # -- verification ---------------------------------------------------------
     def _verify_draft(self, case: dict, report: dict) -> dict:

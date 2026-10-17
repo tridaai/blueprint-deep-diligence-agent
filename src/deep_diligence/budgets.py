@@ -28,16 +28,29 @@ budget on an exhausted case. `fold_budget_ledger` folds those
 entries into the case's consumption; `budget_view` renders the
 per-phase granted-vs-consumed picture from the ledger, not from
 mutable counters.
+
+The guard is also the cost ledger's recording seam (costs.py):
+every model call that ends appends a consumption record — phase,
+role (the main agent, or the sub-agent role the harness named
+the call for), model, and the token split — with the basis of
+the figures. A real provider's returned usage metadata is
+`measured`; the offline stub's declared per-call figures, and
+the character estimate used when a provider returns no usage,
+are `estimated`, and a record never presents one as the other.
 """
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
 from langchain_core.callbacks import BaseCallbackHandler
 
 PHASES = ("planning", "execution")
+
+WORKSTREAM_ROLES = ("financial-scan", "product-scan", "market-scan")
+_WORKSTREAM_SYSTEM = re.compile(r"WORKSTREAM:\s*([a-z][a-z0-9-]*)")
 
 BUDGET_EVENTS = (
     "budget_granted",
@@ -93,6 +106,8 @@ class BudgetGuard(BaseCallbackHandler):
         phase: str = "execution",
         prior_subagents: int = 0,
         prior_wall_seconds: float = 0.0,
+        model: str = "offline:stub",
+        usage_declared: bool = False,
     ):
         # `budget` carries both cap families, already resolved by
         # the caller: max_steps / max_tokens are this phase's caps;
@@ -113,6 +128,17 @@ class BudgetGuard(BaseCallbackHandler):
         self.tool_calls = 0
         self.exceeded: str | None = None
         self._seen_model_runs: set[str] = set()
+        # Cost recording (see the module docstring): the model this
+        # run is attributed to, whether its usage figures are the
+        # offline stub's declared per-call numbers (estimates by
+        # construction, whatever the stub puts in usage_metadata),
+        # the role each in-flight model run belongs to, and the
+        # consumption records of the calls that have ended.
+        self.model = model
+        self.usage_declared = usage_declared
+        self._role_by_run: dict[str, str] = {}
+        self._last_role = "main"
+        self.model_records: list[dict] = []
         # `task` calls started but not yet ended, run_id -> spawn
         # index. When a cap trips, the spawns still in this map are
         # the workstreams the run stopped inside.
@@ -158,7 +184,33 @@ class BudgetGuard(BaseCallbackHandler):
             self._fail("wall_seconds", self.max_wall_seconds, int(elapsed))
 
     # -- LangChain callback surface -------------------------------------------
-    def _count_model_start(self, kwargs: dict) -> None:
+    def _role_for(self, kwargs: dict, messages: list | None = None) -> str:
+        """Which role a model call belongs to: the main agent, or
+        one of the workstream sub-agent roles. The harness names
+        the agent a call runs for in the callback metadata
+        (`lc_agent_name` — the planner agent's own name, or the
+        sub-agent's roster name); the fallback reads the same
+        fact off the system prompt the profile assembled, whose
+        first line states the role. Anything unrecognised is the
+        main agent, which is where a call with no sub-agent
+        context runs by construction."""
+        metadata = kwargs.get("metadata") or {}
+        agent_name = metadata.get("lc_agent_name")
+        if agent_name in WORKSTREAM_ROLES:
+            return agent_name
+        if agent_name:
+            return "main"
+        if messages:
+            first = messages[0][0] if messages[0] else None
+            content = getattr(first, "content", "") or ""
+            text = content if isinstance(content, str) else str(content)
+            if text.startswith("ROLE: WORKSTREAM"):
+                match = _WORKSTREAM_SYSTEM.search(text.splitlines()[0])
+                if match and match.group(1) in WORKSTREAM_ROLES:
+                    return match.group(1)
+        return "main"
+
+    def _count_model_start(self, kwargs: dict, messages: list | None = None) -> None:
         # Chat models fire on_chat_model_start; plain LLMs fire
         # on_llm_start; some stacks fire both for one call. Deduplicate
         # on run_id so a model call is counted exactly once.
@@ -167,6 +219,8 @@ class BudgetGuard(BaseCallbackHandler):
             if run_id in self._seen_model_runs:
                 return
             self._seen_model_runs.add(run_id)
+            self._role_by_run[run_id] = self._role_for(kwargs, messages)
+            self._last_role = self._role_by_run[run_id]
         self.steps += 1
         if self.steps > self.max_steps:
             self._fail("steps", self.max_steps, self.steps)
@@ -178,20 +232,61 @@ class BudgetGuard(BaseCallbackHandler):
     def on_chat_model_start(
         self, serialized: dict, messages: list, **kwargs: Any
     ) -> None:
-        self._count_model_start(kwargs)
+        self._count_model_start(kwargs, messages)
 
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
         total = 0
+        input_tokens = 0
+        output_tokens = 0
+        other_tokens = 0
+        bases: set[str] = set()
+        generations_seen = 0
         for generations in getattr(response, "generations", []) or []:
             for generation in generations:
+                generations_seen += 1
                 message = getattr(generation, "message", None)
                 usage = getattr(message, "usage_metadata", None)
                 if usage and usage.get("total_tokens"):
-                    total += int(usage["total_tokens"])
+                    call_total = int(usage["total_tokens"])
+                    total += call_total
+                    call_input = int(usage.get("input_tokens") or 0)
+                    call_output = int(usage.get("output_tokens") or 0)
+                    input_tokens += call_input
+                    output_tokens += call_output
+                    # A provider's total can carry tokens its
+                    # input/output split does not itemise (cached
+                    # or reasoning tokens on some stacks). They are
+                    # recorded as `other` — counted in the budget
+                    # total, never silently priced as input/output.
+                    other_tokens += call_total - call_input - call_output
+                    bases.add(
+                        "estimated" if self.usage_declared else "measured"
+                    )
                 elif message is not None:
                     content = getattr(message, "content", "") or ""
-                    total += max(1, len(str(content)) // 4)
+                    estimate = max(1, len(str(content)) // 4)
+                    total += estimate
+                    output_tokens += estimate
+                    bases.add("estimated")
         self.tokens += total
+        if generations_seen:
+            run_id = str(kwargs.get("run_id") or "")
+            role = self._role_by_run.pop(run_id, None) or self._last_role
+            self.model_records.append(
+                {
+                    "phase": self.phase,
+                    "role": role,
+                    "model": self.model,
+                    "calls": 1,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "other_tokens": other_tokens,
+                    "total_tokens": total,
+                    "usage_basis": (
+                        bases.pop() if len(bases) == 1 else "mixed"
+                    ),
+                }
+            )
         if self.tokens > self.max_tokens:
             self._fail("tokens", self.max_tokens, self.tokens)
 
@@ -240,6 +335,10 @@ class BudgetGuard(BaseCallbackHandler):
             "wall_seconds": round(time.monotonic() - self.started, 2),
             "exceeded": self.exceeded,
             "interrupted_spawns": list(self.interrupted_spawns),
+            # The per-call consumption records cost accounting
+            # prices (costs.py). Their token totals sum to this
+            # usage's `tokens` — one recording, two ledgers.
+            "model_records": [dict(record) for record in self.model_records],
         }
 
 
