@@ -24,6 +24,19 @@ def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _loads(value):
+    """A stored payload, read back. The two adapters deliver the
+    same document in different wire shapes: SQLite's TEXT columns
+    arrive as a JSON string, PostgreSQL's JSONB columns arrive
+    already parsed by psycopg. Every payload read goes through
+    here so both shapes mean the same thing — a read that assumed
+    the SQLite shape broke on Postgres the first time the
+    production store actually ran (R20)."""
+    if isinstance(value, (str, bytes, bytearray)):
+        return json.loads(value)
+    return value
+
+
 class Store:
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -126,11 +139,11 @@ class Store:
 
     def get_case(self, case_id: str) -> dict | None:
         row = self._fetchone("SELECT payload FROM cases WHERE case_id = ?", (case_id,))
-        return json.loads(row["payload"]) if row else None
+        return _loads(row["payload"]) if row else None
 
     def list_cases(self) -> list[dict]:
         rows = self._fetchall("SELECT payload FROM cases ORDER BY created_at")
-        return [json.loads(r["payload"]) for r in rows]
+        return [_loads(r["payload"]) for r in rows]
 
     def update_case(self, case_id: str, **fields: Any) -> dict:
         case = self.get_case(case_id)
@@ -169,7 +182,7 @@ class Store:
                 "SELECT payload FROM plans WHERE case_id = ? AND version = ?",
                 (case_id, version),
             )
-        return json.loads(row["payload"]) if row else None
+        return _loads(row["payload"]) if row else None
 
     def set_plan_status(self, case_id: str, version: int, status: str) -> None:
         self._execute(
@@ -198,14 +211,14 @@ class Store:
             "SELECT payload FROM evidence WHERE case_id = ? ORDER BY evidence_id",
             (case_id,),
         )
-        return [json.loads(r["payload"]) for r in rows]
+        return [_loads(r["payload"]) for r in rows]
 
     def get_evidence(self, case_id: str, evidence_id: str) -> dict | None:
         row = self._fetchone(
             "SELECT payload FROM evidence WHERE case_id = ? AND evidence_id = ?",
             (case_id, evidence_id),
         )
-        return json.loads(row["payload"]) if row else None
+        return _loads(row["payload"]) if row else None
 
     def count_evidence(self, case_id: str) -> int:
         row = self._fetchone(
@@ -260,7 +273,7 @@ class Store:
             "SELECT payload FROM findings WHERE case_id = ? ORDER BY finding_id",
             (case_id,),
         )
-        return [json.loads(r["payload"]) for r in rows]
+        return [_loads(r["payload"]) for r in rows]
 
     def count_findings(self, case_id: str) -> int:
         row = self._fetchone(
@@ -287,7 +300,7 @@ class Store:
         row = self._fetchone(
             "SELECT payload FROM reports WHERE case_id = ?", (case_id,)
         )
-        return json.loads(row["payload"]) if row else None
+        return _loads(row["payload"]) if row else None
 
     # -- citation ledger ------------------------------------------------------
     def replace_ledger(self, case_id: str, entries: list[dict]) -> list[dict]:
@@ -323,7 +336,7 @@ class Store:
             "SELECT payload FROM citation_ledger WHERE case_id = ? ORDER BY claim_id",
             (case_id,),
         )
-        return [json.loads(r["payload"]) for r in rows]
+        return [_loads(r["payload"]) for r in rows]
 
     def delete_finding(self, case_id: str, finding_id: str) -> None:
         self._execute(
@@ -352,7 +365,7 @@ class Store:
         row = self._fetchone(
             "SELECT payload FROM verifier_reports WHERE case_id = ?", (case_id,)
         )
-        return json.loads(row["payload"]) if row else None
+        return _loads(row["payload"]) if row else None
 
     def replace_quarantine(self, case_id: str, records: list[dict]) -> list[dict]:
         # A fresh verification supersedes the previous quarantine set
@@ -389,7 +402,7 @@ class Store:
             " ORDER BY quarantine_id",
             (case_id,),
         )
-        return [json.loads(r["payload"]) for r in rows]
+        return [_loads(r["payload"]) for r in rows]
 
     def get_quarantine(self, case_id: str, quarantine_id: str) -> dict | None:
         row = self._fetchone(
@@ -397,7 +410,7 @@ class Store:
             " WHERE case_id = ? AND quarantine_id = ?",
             (case_id, quarantine_id),
         )
-        return json.loads(row["payload"]) if row else None
+        return _loads(row["payload"]) if row else None
 
     def update_quarantine(self, case_id: str, record: dict) -> dict:
         self._execute(
@@ -449,7 +462,7 @@ class Store:
             " ORDER BY conflict_id",
             (case_id,),
         )
-        return [json.loads(r["payload"]) for r in rows]
+        return [_loads(r["payload"]) for r in rows]
 
     def get_conflict(self, case_id: str, conflict_id: str) -> dict | None:
         row = self._fetchone(
@@ -457,7 +470,7 @@ class Store:
             " WHERE case_id = ? AND conflict_id = ?",
             (case_id, conflict_id),
         )
-        return json.loads(row["payload"]) if row else None
+        return _loads(row["payload"]) if row else None
 
     def update_conflict(self, case_id: str, record: dict) -> dict:
         self._execute(
@@ -509,7 +522,7 @@ class Store:
             " ORDER BY challenge_id",
             (case_id,),
         )
-        return [json.loads(r["payload"]) for r in rows]
+        return [_loads(r["payload"]) for r in rows]
 
     def get_challenge(self, case_id: str, challenge_id: str) -> dict | None:
         row = self._fetchone(
@@ -517,7 +530,7 @@ class Store:
             " WHERE case_id = ? AND challenge_id = ?",
             (case_id, challenge_id),
         )
-        return json.loads(row["payload"]) if row else None
+        return _loads(row["payload"]) if row else None
 
     def update_challenge(self, case_id: str, record: dict) -> dict:
         self._execute(
@@ -599,13 +612,13 @@ class Store:
             "SELECT payload FROM profile_evaluations WHERE evaluation_id = ?",
             (evaluation_id,),
         )
-        return json.loads(row["payload"]) if row else None
+        return _loads(row["payload"]) if row else None
 
     def list_evaluations(self) -> list[dict]:
         rows = self._fetchall(
             "SELECT payload FROM profile_evaluations ORDER BY seq"
         )
-        return [json.loads(r["payload"]) for r in rows]
+        return [_loads(r["payload"]) for r in rows]
 
     def add_promotion(self, record: dict) -> dict:
         with self._lock:
@@ -629,7 +642,7 @@ class Store:
         rows = self._fetchall(
             "SELECT payload FROM profile_promotions ORDER BY seq"
         )
-        return [json.loads(r["payload"]) for r in rows]
+        return [_loads(r["payload"]) for r in rows]
 
     def latest_promotion(self) -> dict | None:
         promotions = self.list_promotions()
@@ -658,13 +671,13 @@ class Store:
             "SELECT payload FROM skills WHERE name = ? AND version = ?",
             (name, version),
         )
-        return json.loads(row["payload"]) if row else None
+        return _loads(row["payload"]) if row else None
 
     def list_skills(self) -> list[dict]:
         rows = self._fetchall(
             "SELECT payload FROM skills ORDER BY name, version"
         )
-        return [json.loads(r["payload"]) for r in rows]
+        return [_loads(r["payload"]) for r in rows]
 
     def latest_skill(self, name: str) -> dict | None:
         row = self._fetchone(
@@ -672,7 +685,7 @@ class Store:
             " ORDER BY version DESC LIMIT 1",
             (name,),
         )
-        return json.loads(row["payload"]) if row else None
+        return _loads(row["payload"]) if row else None
 
     # -- execution checkpoints --------------------------------------------------
     def save_checkpoint(self, case_id: str, checkpoint: dict) -> dict:
@@ -700,7 +713,7 @@ class Store:
             "SELECT payload FROM execution_checkpoints WHERE case_id = ?",
             (case_id,),
         )
-        return json.loads(row["payload"]) if row else None
+        return _loads(row["payload"]) if row else None
 
     # -- case notes -------------------------------------------------------------
     # The desk's memory of a case. Notes live in their own table —
@@ -741,7 +754,7 @@ class Store:
             " ORDER BY note_id",
             (case_id,),
         )
-        return [json.loads(r["payload"]) for r in rows]
+        return [_loads(r["payload"]) for r in rows]
 
     # -- report section notes -------------------------------------------------
     # An analyst's annotations on sections of a case's report.
@@ -786,7 +799,7 @@ class Store:
             " ORDER BY note_id",
             (case_id,),
         )
-        return [json.loads(r["payload"]) for r in rows]
+        return [_loads(r["payload"]) for r in rows]
 
     def get_section_note(self, case_id: str, note_id: str) -> dict | None:
         row = self._fetchone(
@@ -794,7 +807,7 @@ class Store:
             " WHERE case_id = ? AND note_id = ?",
             (case_id, note_id),
         )
-        return json.loads(row["payload"]) if row else None
+        return _loads(row["payload"]) if row else None
 
     def update_section_note(self, case_id: str, note: dict) -> dict:
         self._execute(
@@ -843,7 +856,7 @@ class Store:
             " ORDER BY snapshot_id",
             (case_id,),
         )
-        return [json.loads(r["payload"]) for r in rows]
+        return [_loads(r["payload"]) for r in rows]
 
     def update_evidence(self, case_id: str, ev: dict) -> dict:
         self._execute(
@@ -875,11 +888,11 @@ class Store:
         row = self._fetchone(
             "SELECT payload FROM sources WHERE name = ?", (name,)
         )
-        return json.loads(row["payload"]) if row else None
+        return _loads(row["payload"]) if row else None
 
     def list_sources(self) -> list[dict]:
         rows = self._fetchall("SELECT payload FROM sources ORDER BY name")
-        return [json.loads(r["payload"]) for r in rows]
+        return [_loads(r["payload"]) for r in rows]
 
     def update_source(self, record: dict) -> dict:
         self._execute(
@@ -927,7 +940,7 @@ class Store:
             " ORDER BY redaction_id",
             (case_id,),
         )
-        return [json.loads(r["payload"]) for r in rows]
+        return [_loads(r["payload"]) for r in rows]
 
     def add_redaction_flag(self, case_id: str, flag: dict) -> dict:
         with self._lock:
@@ -964,7 +977,7 @@ class Store:
             " ORDER BY flag_id",
             (case_id,),
         )
-        return [json.loads(r["payload"]) for r in rows]
+        return [_loads(r["payload"]) for r in rows]
 
     def get_redaction_flag(self, case_id: str, flag_id: str) -> dict | None:
         row = self._fetchone(
@@ -972,7 +985,7 @@ class Store:
             " WHERE case_id = ? AND flag_id = ?",
             (case_id, flag_id),
         )
-        return json.loads(row["payload"]) if row else None
+        return _loads(row["payload"]) if row else None
 
     def update_redaction_flag(self, case_id: str, flag: dict) -> dict:
         self._execute(
@@ -1004,13 +1017,13 @@ class Store:
             "SELECT payload FROM case_tombstones WHERE case_id = ?",
             (case_id,),
         )
-        return json.loads(row["payload"]) if row else None
+        return _loads(row["payload"]) if row else None
 
     def list_tombstones(self) -> list[dict]:
         rows = self._fetchall(
             "SELECT payload FROM case_tombstones ORDER BY deleted_at"
         )
-        return [json.loads(r["payload"]) for r in rows]
+        return [_loads(r["payload"]) for r in rows]
 
     def delete_case_data(self, case_id: str) -> None:
         # Every case-scoped table, in one locked step: a deletion
@@ -1077,14 +1090,14 @@ class Store:
                 " WHERE analyst = ? ORDER BY view_id",
                 (analyst,),
             )
-        return [json.loads(r["payload"]) for r in rows]
+        return [_loads(r["payload"]) for r in rows]
 
     def get_view(self, view_id: str) -> dict | None:
         row = self._fetchone(
             "SELECT payload FROM workbench_views WHERE view_id = ?",
             (view_id,),
         )
-        return json.loads(row["payload"]) if row else None
+        return _loads(row["payload"]) if row else None
 
     def find_view(self, analyst: str, name: str) -> dict | None:
         row = self._fetchone(
@@ -1092,7 +1105,7 @@ class Store:
             " WHERE analyst = ? AND name = ?",
             (analyst, name),
         )
-        return json.loads(row["payload"]) if row else None
+        return _loads(row["payload"]) if row else None
 
     def update_view(self, view: dict) -> dict:
         self._execute(
@@ -1147,13 +1160,13 @@ class Store:
             "SELECT payload FROM engagements WHERE engagement_id = ?",
             (engagement_id,),
         )
-        return json.loads(row["payload"]) if row else None
+        return _loads(row["payload"]) if row else None
 
     def list_engagements(self) -> list[dict]:
         rows = self._fetchall(
             "SELECT payload FROM engagements ORDER BY engagement_id"
         )
-        return [json.loads(r["payload"]) for r in rows]
+        return [_loads(r["payload"]) for r in rows]
 
     def update_engagement(self, record: dict) -> dict:
         self._execute(
@@ -1204,7 +1217,7 @@ class Store:
             " ORDER BY version DESC LIMIT 1",
             (day,),
         )
-        return json.loads(row["payload"]) if row else None
+        return _loads(row["payload"]) if row else None
 
     def list_digests(self) -> list[dict]:
         """Every stored digest version, oldest day first, version
@@ -1214,7 +1227,7 @@ class Store:
             "SELECT payload FROM operations_digests"
             " ORDER BY day, version"
         )
-        return [json.loads(r["payload"]) for r in rows]
+        return [_loads(r["payload"]) for r in rows]
 
     # -- audit ------------------------------------------------------------------
     def add_audit(self, case_id: str, event: str, payload: dict | None = None) -> None:
@@ -1229,7 +1242,7 @@ class Store:
             (case_id,),
         )
         return [
-            {"ts": r["ts"], "event": r["event"], "payload": json.loads(r["payload"])}
+            {"ts": r["ts"], "event": r["event"], "payload": _loads(r["payload"])}
             for r in rows
         ]
 
