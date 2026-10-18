@@ -632,6 +632,59 @@ the case. No index is maintained: the desk's case volume makes
 a scan the honest implementation, and the result order follows
 the case list.
 
+## Portfolio mode
+
+The workbench sees the whole desk or one case; a desk also
+thinks in mandates. An **engagement** is the grouping above a
+case — one client's pipeline of vendor and acquisition
+diligences. It is a governed record in its own table
+(`engagements`): name, client label, owner, created by/at, and
+an append-only history of the acts on it. Membership lives on
+the case records: a case carries at most one `engagement_id`,
+so the engagement holds no member list that could drift from
+the cases it groups.
+
+Assignment is a recorded act on both records, in the triage
+pattern. The case's audit trail gains
+`case_assigned_to_engagement` (naming the engagement and the
+one it replaced) or `case_removed_from_engagement`; the
+engagement's history gains `case_assigned` / `case_unassigned`
+entries naming the case and the other side of the move. A
+no-op assignment is refused — a membership that does not
+change is not an act.
+
+The portfolio view (`portfolio.py`, `GET /api/portfolio` and
+`/api/portfolio/{engagement_id}`) is a derivation, like the
+queue: folded from the member cases' records on every read.
+Counts by case state come off the case records. The gate list
+is the workbench queue's own items filtered to members — same
+groups, same waits, so the portfolio can never show a gate the
+desk queue does not, and the oldest-waiting item is simply the
+earliest of them. The cost roll-up sums `fold_cost_ledger` over
+each member's audit trail with Decimal arithmetic and converts
+once at the boundary; budgets are never merged. Per-question
+grades are recomputed by the one documented rule
+(`report_model.question_grade`) over each case's own report, so
+a portfolio row cannot disagree with the report it summarises.
+Open conflicts and quarantined claims are listed by id,
+labelled with their case. Each member's retention standing is
+computed with the governance helpers and surfaced as flags —
+`legal_hold`, `past_retention` — read-only: surfacing them is
+what keeps the grouping from ever reading as a bulk handle.
+
+Isolation is the invariant. Membership writes exactly one
+field on the case record and opens no path between cases:
+evidence, findings, citations, budgets, gates, and retention
+all stay case-scoped, resolved through the same per-case store
+reads as before (the R14 defences are untouched — an evidence
+ID still names a document in its own case only, even when a
+sibling case in the same engagement holds a lookalike ID).
+Search gains a scope, not a merge: `search_cases` takes an
+optional case set, and the engagement-scoped search reads only
+member cases, returning the same case-labelled hits. There is
+no portfolio-level decision or deletion route — the route
+table is tested for their absence, as the workbench's was.
+
 ## The virtual filesystem
 
 `EvidenceBackend` implements the Deep Agents `BackendProtocol` over
@@ -656,13 +709,16 @@ analyst's report annotations, apart from the report record),
 by name), `redactions`, `redaction_flags`, `case_tombstones`,
 `workbench_views` (an analyst's saved queue filters, keyed by
 analyst and name — the one workbench table, holding no case
-state). Case records carry the active harness
+state), `engagements` (the grouping above a case: name, client
+label, owner, and the record's own act history — membership
+itself lives on the case records, never here). Case records carry the active harness
 profile's stamp (id, version, target model) from intake, and their
 continuity state: open `stale_marks` and the append-only
 `staleness_decisions`, plus their `retention_class` and the
 append-only `retention_history` of hold acts, plus their
 workbench triage state: an `assignee` and a `priority`, each set
-as a recorded act. The audit
+as a recorded act, plus their portfolio membership: an
+`engagement_id`, set by the recorded assignment acts. The audit
 trail records case creation, evidence ingestion, plan generation
 and decisions, sub-agent spawns, budget ledger entries (grants —
 each naming the profile the phase ran under — consumption
@@ -679,7 +735,9 @@ evidence redactions with their claim flags and flag decisions, and
 case deletions (the last event a case ever records; the tombstone
 outlives it) — plus report section notes added and edited — plus
 the workbench triage acts: case assignments and priority changes,
-each naming the actor and the value it replaced.
+each naming the actor and the value it replaced — plus the
+portfolio acts: cases assigned to and removed from engagements,
+each naming the engagement and the membership it replaced.
 
 ## Models
 

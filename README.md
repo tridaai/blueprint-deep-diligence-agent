@@ -376,6 +376,28 @@ is accountable for lives in our code around it:
   orders the desk's work and gates nothing: there is no bulk
   decision anywhere, and every gate decision remains one case,
   one analyst, made on the case itself.
+- **Portfolio mode.** A desk runs a client's pipeline, not one
+  case at a time — so cases group under an **engagement**: a
+  governed record (name, client label, owner, created by/at)
+  with its own act history. Membership lives on the case
+  records, and assigning, moving, or removing a case is a
+  recorded act on both records — a move names where the case
+  came from and where it went, and nothing moves silently.
+  The **portfolio view** (`GET /api/portfolio/{engagement_id}`,
+  and a console panel) folds from the member cases' records on
+  every read: counts by case state, the gates awaiting decision
+  across the portfolio (the workbench queue's own items, scoped
+  to the engagement, with the oldest wait), each case's
+  per-question support grades, open conflicts and quarantined
+  claims by id and case, and the cost roll-up summed from the
+  cases' own ledgers. Nothing is stored that could drift, and
+  membership changes nothing inside a case: gates, budgets,
+  evidence, and retention stay per case — search scoped to an
+  engagement returns case-scoped hits labelled by case, a
+  finding's evidence still resolves only inside its own case,
+  and held or past-retention members are surfaced distinctly
+  precisely because the portfolio is never a bulk handle on
+  them. There is no portfolio-level decision or deletion route.
 
 `docs/architecture.md` has the component map and the details.
 
@@ -440,6 +462,19 @@ offline model and grades:
   document's own fact ledger; `record_finding` checks a fact
   reference against that ledger) — the full account, before and
   after, is `docs/red-team.md`
+- **Portfolio pack** — one engagement with three cases at three
+  states (one FINAL, one at the report gate, one
+  BUDGET_EXHAUSTED) grades the portfolio fold exactly: the
+  counts by state, the gate list against the workbench queue
+  recomputed independently, the cost total recomputed from the
+  cases' own ledgers, the per-question grades, and a held
+  member surfaced as held. A second scenario puts the red-team
+  pack's two cross-case subjects inside one engagement and
+  replays the citation attacks there — foreign and unknown
+  evidence IDs refused, the foreign ID dropped from a mixed
+  citation, the sibling case's fact refused against this case's
+  own evidence — with cross-case citations accepted at 0, and
+  engagement-scoped search answering member hits only
 
 Current results (offline stub): recall **1.000** on all four cases,
 citation completeness and correctness **1.000**, budgets compliant;
@@ -457,8 +492,12 @@ the chain's schedule and handoff grade clean at recall **1.000**,
 and the failure variant's missing branch ends empty with its
 question NOT COVERED and the reason named, the case at
 DRAFT_READY. The red-team pack holds all 21
-attacks with its four counters at zero. The pytest suite
-(232 tests) covers the gates, the budget caps, the evidence backend,
+attacks with its four counters at zero. The portfolio pack
+grades its three-state fold exactly — counts, gates, and the
+cost total recomputed from the cases' ledgers all match — and
+its in-engagement citation attacks are all refused, with
+cross-case citations accepted at zero. The pytest suite
+(241 tests) covers the gates, the budget caps, the evidence backend,
 the citation rules, the ledger's drift gate, the verifier and
 quarantine, conflict detection and handling, per-phase budgets,
 the budget ledger, the partial-report protocol, amendment, the
@@ -491,7 +530,14 @@ model, and the budget-vs-actual report on the budget-tight case
 through amendment and re-run, and the red-team defences: the
 verifier's ledger rule, record_finding's ledger and case-scope
 checks, the intake refusal, and the pack itself held as
-regression cases.
+regression cases, and portfolio mode: engagement records and
+their act history, assignment and moves recorded on both
+records, the fold graded against hand-built member records
+(counts, gates, costs, grades, open items), held and
+past-retention members surfaced, engagement-scoped search,
+cross-case citation inside one engagement refused, and the
+route table's proof that no portfolio-level decision or
+deletion route exists.
 
 The eval runner also runs the packs under any other profile —
 `python evals/run_evals.py --profile openai-gpt` — with the report
@@ -619,6 +665,9 @@ src/deep_diligence/
   workbench.py    the analyst workbench: the queue derived from
                   case records, the merged case timeline, saved
                   views, and deterministic case search
+  portfolio.py    portfolio mode: engagements and the portfolio
+                  fold — counts, gates, grades, open items, and
+                  cost summed from the member cases' records
   composer.py     deterministic report assembly from findings
   report_model.py the report as a structured model: executive
                   summary under its integrity check, support
