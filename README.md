@@ -572,7 +572,7 @@ role-mismatched name and an unknown name refuse at the gate,
 and a tool-widening version and a line-skipping version refuse
 at publish, the mid-case publish leaving the pinned case on
 version 1 and the next approved plan pinning version 2. The pytest suite
-(253 tests) covers the gates, the budget caps, the evidence backend,
+(282 tests) covers the gates, the budget caps, the evidence backend,
 the citation rules, the ledger's drift gate, the verifier and
 quarantine, conflict detection and handling, per-phase budgets,
 the budget ledger, the partial-report protocol, amendment, the
