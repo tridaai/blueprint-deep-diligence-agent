@@ -52,6 +52,7 @@ from .governance import (
     seed_sources,
 )
 from .harness import build_agent, execute_message, plan_message
+from .deployment import check_live_permission, deployment_record
 from .ledger import verify_ledger
 from .llm import build_model, model_label
 from .models import PRIORITIES, BudgetIn, BriefIn
@@ -156,6 +157,17 @@ class CaseService:
         # analyst-registered records are never overwritten).
         seed_sources(self.store)
         self.profile = self._resolve_active_profile()
+        # Deployment profile (R19, deployment.py): the composition
+        # was validated at settings load; the one rule settings
+        # cannot judge — under a hosted profile, live models are
+        # permitted only through a promoted harness profile — is
+        # checked here, against the promotion log the active
+        # profile was just resolved from. It refuses the boot the
+        # same way, before any case work.
+        check_live_permission(
+            settings,
+            profile_promoted=self.store.latest_promotion() is not None,
+        )
         # The skills library: the shipped artifacts are seeded
         # into the store — the runtime library of record — before
         # any case work. Seeding validates structurally and is
@@ -197,6 +209,15 @@ class CaseService:
                 "the gate refuses to run a version the log did not promote"
             )
         return promoted
+
+    def _deployment_stamp(self) -> dict:
+        """The deployment record for work done now: the named
+        composition this process booted under, with the harness
+        profile as it stands at this moment (a promotion moves
+        the pointer for later work, exactly as the profile stamp
+        already behaves). Stamped on the case at intake and on
+        every run's grant entry."""
+        return deployment_record(self.settings, self.profile.id)
 
     # -- profile regression gate ----------------------------------------------
     def active_profile_info(self) -> dict:
@@ -331,6 +352,11 @@ class CaseService:
                 # audit trail attributes planning and execution to a
                 # profile id + version, not just to a date.
                 "profile": self.profile.record(),
+                # And the deployment it ran under (R19): the named
+                # composition — deployment profile, harness profile,
+                # store backend — so the trace can say which
+                # deployment produced this run.
+                "deployment": self._deployment_stamp(),
             },
         )
         sink: list = []
@@ -445,6 +471,12 @@ class CaseService:
             # run under this profile (id + version), and the case
             # view shows it.
             "profile": self.profile.record(),
+            # The deployment stamp (R19): the named composition the
+            # case was born under — deployment profile, harness
+            # profile, store backend. Cases created before
+            # deployment profiles existed carry no stamp and read
+            # as deployment-unknown, never backfilled.
+            "deployment": self._deployment_stamp(),
             "created_at": now,
             "updated_at": now,
         }
@@ -453,7 +485,11 @@ class CaseService:
         self.store.add_audit(
             case_id,
             "case_created",
-            {"subject": brief.subject, "profile": self.profile.record()},
+            {
+                "subject": brief.subject,
+                "profile": self.profile.record(),
+                "deployment": self._deployment_stamp(),
+            },
         )
         self.store.add_audit(
             case_id, "evidence_ingested", {"count": len(evidence)}

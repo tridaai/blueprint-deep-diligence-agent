@@ -1077,7 +1077,7 @@ async function refreshDigests() {
 async function init() {
   try {
     const ready = await api("/readiness");
-    $("#readiness").textContent = `store: ${ready.store} · objects: ${ready.objects} · model: ${ready.model}`;
+    $("#readiness").textContent = `store: ${ready.store} · objects: ${ready.objects} · model: ${ready.model} · deployment: ${ready.deployment} · harness: ${ready.harness_profile}`;
     $("#readiness").classList.add("ok");
   } catch { $("#readiness").textContent = "not ready"; }
   const corpus = await api("/api/corpus");

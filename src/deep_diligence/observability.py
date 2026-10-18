@@ -53,6 +53,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from .costs import fold_cost_ledger
+from .deployment import deployment_view
 from .store import Store, utcnow
 
 # ---------------------------------------------------------------- taxonomy
@@ -405,6 +406,10 @@ def _fold_runs(audit: list[dict]) -> list[dict]:
                 "caps": payload.get("caps"),
                 "case_caps": payload.get("case_caps"),
                 "profile": payload.get("profile"),
+                # The deployment the run ran under (R19), stamped
+                # on the grant entry. Runs granted before deployment
+                # records existed read as unknown, not backfilled.
+                "deployment": deployment_view(payload.get("deployment")),
                 "consumed": None,
                 "consumed_at": None,
                 "exceeded": None,
@@ -487,6 +492,10 @@ def build_trace(store: Store, case_id: str) -> dict:
         "created_at": case["created_at"],
         "updated_at": case["updated_at"],
         "profile": case.get("profile") or {},
+        # The deployment the case was born under (R19), from its
+        # intake stamp; a case that predates deployment records
+        # reads as unknown here as it does on the case view.
+        "deployment": deployment_view(case.get("deployment")),
         "outcome": classify_case_outcome(store, case_id),
         "counts": {
             "findings": len(findings),

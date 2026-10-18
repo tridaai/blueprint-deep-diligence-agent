@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from .deployment import unknown_deployment
+
 WORKSTREAMS = ("financial-scan", "product-scan", "market-scan")
 
 # Case lifecycle. Execution is impossible before PLAN_APPROVED; a report
@@ -326,5 +328,11 @@ class CaseOut(BaseModel):
     # case at intake — the profile that ran its planning and
     # execution. Empty for cases created before profiles existed.
     profile: dict[str, Any] = Field(default_factory=dict)
+    # The deployment composition (R19) stamped on the case at
+    # intake: deployment profile name, harness profile id, store
+    # backend. Cases created before deployment profiles existed
+    # read as deployment-unknown — never backfilled with the
+    # composition the current process happened to boot under.
+    deployment: dict[str, Any] = Field(default_factory=unknown_deployment)
     created_at: str
     updated_at: str

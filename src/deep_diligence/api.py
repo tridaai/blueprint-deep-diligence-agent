@@ -102,6 +102,11 @@ def create_app(
                 "store": settings.store_backend if store_ok else "down",
                 "objects": settings.object_backend if objects_ok else "down",
                 "model": settings.llm_backend,
+                # The deployment this process booted under (R19):
+                # the named composition, and the harness profile
+                # the R7 gate's resolution made active.
+                "deployment": settings.deployment_profile,
+                "harness_profile": service.profile.id,
             },
         )
 
