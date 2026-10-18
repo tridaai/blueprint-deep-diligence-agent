@@ -1404,3 +1404,86 @@ their defences were built — is `docs/red-team.md`.
   not outcomes: nothing terminal happened, and the case reads
   in_progress at its gate, with the refusal living in the API's
   409 and nowhere else.
+
+## The twenty rounds
+
+The blueprint was built in twenty rounds, each one survey-first
+and gated on the full suite and evals before it landed:
+
+1. **Core build** — case intake and the brief schema, the plan
+   gate, the Deep Agents harness wired (planning, sub-agents,
+   virtual filesystem on the evidence store), the offline corpus
+   with three gold cases, the report composer, the report gate,
+   budget caps, the production spine, the console, evals v1.
+2. **Citation ledger** — composition is the citation act: a claim
+   enters the report only by citing case evidence, and report
+   approval re-verifies the cited hashes, so drift blocks it.
+3. **Independent verifier** — a store-only second pass over the
+   draft's claims; failing claims are quarantined, and the analyst
+   may reinvestigate or drop a claim, never approve one in.
+4. **Contradictions** — conflicts as first-class records with a
+   governed metric lexicon; the analyst may only mark a conflict
+   NOTED — resolution is never written by the system.
+5. **Budget hardening** — per-phase budgets, a budget ledger, the
+   partial-report protocol naming uncovered questions, and
+   governed budget amendment.
+6. **Harness profiles v1** — versioned profile artifacts behind a
+   fail-closed loader; the offline-stub and one live-target
+   profile.
+7. **Profile regression gate** — a fixed tuning/held-out split,
+   worst-of-3-runs decides, hash-checked evaluations, promotion
+   and rollback as judged acts; the shipped controls prove the
+   live-target profile is not promotable on recall and that a
+   behaviour-identical copy is.
+8. **Dependency-aware plans** — workstreams declare dependencies,
+   execute in topological waves with bounded handoffs and failure
+   isolation; a double run composes byte-identically.
+9. **Long-case continuity** — checkpoints and resume, mid-case
+   evidence arrival with staleness marks, a governed re-plan reuse
+   rule, and analyst notes that are context, never evidence.
+10. **Source governance** — a registered-source registry with
+    trust tiers and retention, legal hold, tombstone deletion,
+    and redaction that blocks report approval until decided.
+11. **Report composer depth** — one structured report model
+    behind the markdown, HTML, and JSON renderings; the executive
+    summary composed from verified claims only; per-question
+    grades; a risks section that never quotes quarantined text.
+12. **Analyst workbench** — the case queue as a pure derivation
+    over the store (no bulk decisions, proven against the route
+    table), saved views, and search.
+13. **Cost accounting** — a governed price table and a priced
+    cost ledger per run, folded per case and across the desk.
+14. **Red team** — crafted attack packs (evidence poisoning,
+    instruction smuggling, verifier gaming); two real defects
+    found and fixed at their owning layers before the pack held
+    21/21.
+15. **Portfolio mode** — engagements as records; membership is
+    one field on the case and isolation is the invariant: no
+    cross-case citation, no portfolio-level decision, and the
+    portfolio view a pure fold over member records.
+16. **Challenge pass** — a deterministic second opinion computed
+    from stored records after composition; must-answer challenges
+    block the report gate until rebutted with named
+    counter-evidence, revised away, or downgraded into quarantine.
+17. **Skills library** — governed, versioned method bundles;
+    plans name skills, approval pins versions, findings carry the
+    provenance, and a skill may narrow a role's method but never
+    widen its tools.
+18. **Observability** — a per-case execution trace folded from
+    records, a total failure taxonomy over run outcomes, and a
+    daily operations digest stored as a versioned record.
+19. **Deployment profiles** — local / hosted / hosted-self as
+    named, validated runtime compositions; the deployment is
+    recorded on every case and run, and live models are permitted
+    only behind a promoted harness profile.
+20. **Release hardening** — the production store run live for the
+    first time, against PostgreSQL 16.15 + pgvector 0.8.7. It had
+    a real defect: every payload read assumed SQLite's wire shape
+    (JSONB arrives from psycopg already parsed), so the hosted
+    profile could not boot at all. Fixed at the store layer, with
+    an env-gated conformance leg as the regression test; the
+    hosted profile then booted and ran a gold case to FINAL over
+    HTTP, read back from the database itself, and a fresh-database
+    prod smoke passed the same way. The unit suite keeps its
+    per-test SQLite stores — that is its fixture contract, and
+    the conformance leg is where the Postgres adapter is proven.
