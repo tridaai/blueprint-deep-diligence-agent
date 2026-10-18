@@ -104,6 +104,18 @@ case, a rejected plan, a fresh intake — and asserts the
 taxonomy is total: every outcome is one of the documented
 labels, and no terminal case hides in the in-progress fallback.
 
+The deployment pack (run_deployment_cases) grades the boot seam:
+a deployment profile is selected through the environment, the way
+a deployment selects it, and the compositions are judged there —
+the local profile boots and runs a gold case end to end on the
+stub, with the deployment recorded on the case, its runs, and its
+trace; hosted without DATABASE_URL refuses by name; local with a
+live default refuses by name; hosted-self without its base URL
+refuses by name; an unknown profile name refuses with the valid
+set listed. The pack grades composition and the record, so it
+stands outside the promotion split, like the budget and red-team
+packs.
+
 Exit code 0 only when every gate passes for every case.
 
 Profiles: `--profile <id>` runs the same packs under a different
@@ -1383,6 +1395,145 @@ def run_observability_cases(profile_id: str = DEFAULT_PROFILE) -> dict:
     }
 
 
+def run_deployment_cases() -> dict:
+    """The deployment pack: named runtime compositions graded at
+    the boot seam. A deployment profile is selected through the
+    environment — DEPLOYMENT_PROFILE is the deployment's own
+    knob — so the pack composes its settings the way a deployment
+    does, with the environment set and restored per scenario, and
+    judges both halves of the round: the compositions that must
+    refuse, by name, and the one that must boot — local, on the
+    stub, running the Helvion gold case end to end with the
+    deployment recorded on the case, on every run, and in the
+    trace the desk reads. Hosted's happy path needs a live
+    PostgreSQL, which the offline gate does not stand up; hosted
+    is graded on its refusals here and on its composition in the
+    test suite. The pack grades composition and the record, so
+    it stands outside the promotion split, like the budget and
+    red-team packs."""
+    import contextlib
+    import os
+
+    from deep_diligence.deployment import ConfigError
+
+    checks: list[dict] = []
+
+    def check(name: str, ok: bool, detail: str = "") -> None:
+        checks.append({"name": name, "ok": bool(ok), "detail": detail})
+
+    @contextlib.contextmanager
+    def boot_env(**updates):
+        saved = {name: os.environ.get(name) for name in updates}
+        for name, value in updates.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+        try:
+            yield
+        finally:
+            for name, value in saved.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
+    def refusal(name: str, updates: dict, must_name: str) -> None:
+        with boot_env(**updates):
+            try:
+                load_settings()
+            except ConfigError as exc:
+                check(
+                    name,
+                    must_name in str(exc),
+                    f"refused: {exc}",
+                )
+                return
+        check(name, False, "the composition booted; no refusal was raised")
+
+    # -- the refusals, by name ---------------------------------------------
+    refusal(
+        "unknown-profile-refuses-listing-the-valid-set",
+        {"DEPLOYMENT_PROFILE": "bogus"},
+        "local, hosted, hosted-self",
+    )
+    refusal(
+        "hosted-without-database-url-refuses-by-name",
+        {"DEPLOYMENT_PROFILE": "hosted", "DATABASE_URL": None},
+        "DATABASE_URL",
+    )
+    refusal(
+        "local-with-a-live-default-profile-refuses-by-name",
+        {"DEPLOYMENT_PROFILE": "local", "PROFILE_ID": "openai-gpt"},
+        "openai-gpt",
+    )
+    refusal(
+        "local-with-a-live-model-refuses-by-name",
+        {"DEPLOYMENT_PROFILE": "local", "LLM_BACKEND": "openai"},
+        "forbidden",
+    )
+    scratch = Path(tempfile.mkdtemp(prefix="deep-diligence-eval-deploy-"))
+    refusal(
+        "hosted-self-without-its-base-url-refuses-by-name",
+        {
+            "DEPLOYMENT_PROFILE": "hosted-self",
+            "DATABASE_URL": "postgresql://db/diligence",
+            "OBJECT_DIR": str(scratch / "objects"),
+            "LLM_BACKEND": "openai",
+            "OPENAI_BASE_URL": None,
+        },
+        "OPENAI_BASE_URL",
+    )
+
+    # -- local boots, runs the gold case, and records itself ----------------
+    with boot_env(
+        DEPLOYMENT_PROFILE="local",
+        DATABASE_URL=None,
+        LLM_BACKEND=None,
+        PROFILE_ID=None,
+    ):
+        settings = load_settings(
+            sqlite_path=str(scratch / "diligence.db"),
+            object_dir=str(scratch / "objects"),
+            migrations_dir=str(REPO_ROOT / "migrations"),
+        )
+        service = CaseService(settings)
+        gold = GOLD_CASES[0]
+        case = service.create_case(BriefIn(**gold["brief"]))
+        case_id = case["case_id"]
+        service.run_planning(case_id)
+        service.decide_plan(case_id, analyst="Eval Harness", approve=True)
+        service.run_execution(case_id)
+        record = service.store.get_case(case_id)
+        stamp = {
+            "profile": "local",
+            "harness_profile": "offline-stub",
+            "store": "sqlite",
+        }
+        check(
+            "local-boots-and-runs-the-gold-case",
+            record["status"] == "DRAFT_READY"
+            and record["deployment"] == stamp,
+            f"gold case {record['status']}, deployment "
+            f"{record.get('deployment')}",
+        )
+        trace = service.case_trace(case_id)
+        check(
+            "the-deployment-rides-the-runs-and-the-trace",
+            trace["deployment"] == stamp
+            and bool(trace["runs"])
+            and all(run["deployment"] == stamp for run in trace["runs"]),
+            f"trace deployment {trace['deployment']}, "
+            f"{len(trace['runs'])} runs stamped",
+        )
+
+    return {
+        "key": "deployment-profiles",
+        "checks": checks,
+        "ok": all(c["ok"] for c in checks),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Gold case-pack gate for the Deep Diligence Agent."
@@ -1709,6 +1860,25 @@ def main(argv: list[str] | None = None) -> int:
             f"  observability check {obs_check['name']}: "
             f"{'OK' if obs_check['ok'] else 'FAILED'}"
             f" — {obs_check['detail']}"
+        )
+    # Deployment pack: the named runtime compositions graded at
+    # the boot seam — local boots and runs the gold case with the
+    # deployment recorded on the case, its runs, and its trace;
+    # the invalid compositions refuse by name. Outside the
+    # promotion split, like the budget and red-team packs.
+    deployment_result = run_deployment_cases()
+    all_pass = all_pass and deployment_result["ok"]
+    print(
+        f"{deployment_result['key']}: local boots and records "
+        f"itself on the gold run; hosted, hosted-self, and the "
+        f"invalid local compositions refuse by name "
+        f"-> {'PASS' if deployment_result['ok'] else 'FAIL'}"
+    )
+    for deployment_check in deployment_result["checks"]:
+        print(
+            f"  deployment check {deployment_check['name']}: "
+            f"{'OK' if deployment_check['ok'] else 'FAILED'}"
+            f" — {deployment_check['detail']}"
         )
     print(
         f"unsupported claims in final reports across all packs: "
