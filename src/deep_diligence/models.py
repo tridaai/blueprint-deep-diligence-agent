@@ -202,6 +202,26 @@ class PriorityIn(BaseModel):
     priority: Literal["normal", "high", "urgent"]
 
 
+class EngagementIn(BaseModel):
+    """Creating an engagement is a recorded act: who created it
+    is on the record beside the name, the client label, and the
+    owner — the desk member the mandate belongs to."""
+    analyst: str = Field(min_length=1, max_length=120)
+    name: str = Field(min_length=2, max_length=200)
+    client: str = Field(min_length=1, max_length=200)
+    owner: str = Field(min_length=1, max_length=120)
+
+
+class EngagementAssignIn(BaseModel):
+    """Assigning a case to an engagement is a recorded act, like
+    triage assignment. A null engagement_id removes the case from
+    its engagement, back to the unassigned pool. Membership is
+    organisational only: it confers no decision rights and opens
+    no citation path — every case's evidence stays its own."""
+    analyst: str = Field(min_length=1, max_length=120)
+    engagement_id: str | None = Field(default=None, max_length=40)
+
+
 class WorkbenchViewIn(BaseModel):
     """A saved queue filter. The filter keys are the workbench's
     own (act, assignee, priority); unknown keys are refused by
@@ -242,6 +262,11 @@ class CaseOut(BaseModel):
     # one analyst, made on the case itself.
     assignee: str | None = None
     priority: str = "normal"
+    # Portfolio mode: the engagement (client mandate) this case
+    # runs under, or None. Membership is organisational — it
+    # scopes portfolio views and search, and changes nothing
+    # inside the case.
+    engagement_id: str | None = None
     brief: dict[str, Any]
     usage: dict[str, Any] = Field(default_factory=dict)
     # Long-case continuity: workstreams marked stale by evidence

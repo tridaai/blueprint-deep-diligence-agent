@@ -332,6 +332,8 @@ _EVENT_LABELS = {
     "source_registered": "Source registered",
     "case_assigned": "Case assigned",
     "case_priority_set": "Priority set",
+    "case_assigned_to_engagement": "Case added to an engagement",
+    "case_removed_from_engagement": "Case removed from its engagement",
     "case_deleted": "Case deleted",
     "subagent_spawned": "Sub-agent spawned",
     "workstream_started": "Workstream started",
@@ -353,6 +355,7 @@ _DETAIL_KEYS = (
     ("evidence_id", "{value}"),
     ("assignee", "assignee: {value}"),
     ("priority", "priority: {value}"),
+    ("engagement_name", "engagement: {value}"),
     ("action", "{value}"),
     ("reason", "{value}"),
     ("note", "{value}"),
@@ -432,18 +435,29 @@ def _snippet(text: str, needle: str, width: int = 200) -> str:
     return prefix + text[start:end] + suffix
 
 
-def search_cases(store: Store, query: str) -> list[dict]:
+def search_cases(
+    store: Store, query: str, case_ids: set[str] | None = None
+) -> list[dict]:
     """Deterministic substring search over the desk's cases: the
     subject, the brief's questions, and the findings' claims. A
     hit names the field it came from (and the question or finding
     id), so the analyst lands on the text that matched, not just
     the case. Case-insensitive; ordering follows the case list
-    (oldest case first), matches in field order."""
+    (oldest case first), matches in field order.
+
+    `case_ids` scopes the search to a set of cases — portfolio
+    mode passes an engagement's members. Scoping narrows which
+    cases are read; it never widens what a hit can draw on: each
+    result is still one case's own records, labelled with that
+    case's id, and a finding's citations still resolve only
+    inside that case."""
     needle = (query or "").strip().lower()
     if not needle:
         raise ValueError("a search needs a query")
     results: list[dict] = []
     for case in store.list_cases():
+        if case_ids is not None and case["case_id"] not in case_ids:
+            continue
         matches: list[dict] = []
         if needle in case["subject"].lower():
             matches.append(

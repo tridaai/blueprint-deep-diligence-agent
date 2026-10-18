@@ -1008,6 +1008,66 @@ class Store:
             "DELETE FROM workbench_views WHERE view_id = ?", (view_id,)
         )
 
+    # -- engagements ----------------------------------------------------
+    # Portfolio mode (R15): the grouping above a case. The record
+    # carries the engagement's name, client label, owner, and the
+    # history of the acts on it (creation, case assignments in and
+    # out). Membership itself lives on the case records (their
+    # engagement_id), so this table never holds a member list that
+    # could drift from the cases it groups.
+    def add_engagement(self, record: dict) -> dict:
+        with self._lock:
+            # Minted from the highest existing suffix, not a row
+            # count, for the same reason as view IDs: a reused ID
+            # would collide on the primary key.
+            rows = self._fetchall("SELECT engagement_id FROM engagements")
+            highest = max(
+                (int(r["engagement_id"].split("-")[1]) for r in rows),
+                default=0,
+            )
+            record = {**record, "engagement_id": f"ENG-{highest + 1:04d}"}
+            self._conn.execute(
+                self._sql(
+                    "INSERT INTO engagements"
+                    " (engagement_id, name, payload, created_at, updated_at)"
+                    " VALUES (?, ?, ?, ?, ?)"
+                ),
+                (
+                    record["engagement_id"],
+                    record["name"],
+                    json.dumps(record),
+                    record["created_at"],
+                    record["updated_at"],
+                ),
+            )
+            self._conn.commit()
+            return record
+
+    def get_engagement(self, engagement_id: str) -> dict | None:
+        row = self._fetchone(
+            "SELECT payload FROM engagements WHERE engagement_id = ?",
+            (engagement_id,),
+        )
+        return json.loads(row["payload"]) if row else None
+
+    def list_engagements(self) -> list[dict]:
+        rows = self._fetchall(
+            "SELECT payload FROM engagements ORDER BY engagement_id"
+        )
+        return [json.loads(r["payload"]) for r in rows]
+
+    def update_engagement(self, record: dict) -> dict:
+        self._execute(
+            "UPDATE engagements SET payload = ?, updated_at = ?"
+            " WHERE engagement_id = ?",
+            (
+                json.dumps(record),
+                record["updated_at"],
+                record["engagement_id"],
+            ),
+        )
+        return record
+
     # -- audit ------------------------------------------------------------------
     def add_audit(self, case_id: str, event: str, payload: dict | None = None) -> None:
         self._execute(
