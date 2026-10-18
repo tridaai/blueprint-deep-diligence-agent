@@ -472,6 +472,66 @@ class Store:
         )
         return record
 
+    # -- challenges -----------------------------------------------------------
+    def replace_challenges(self, case_id: str, records: list[dict]) -> list[dict]:
+        # The challenge shelf holds the case's full challenge
+        # history — open, answered, and superseded records alike —
+        # so a sync writes the whole set back in one locked step
+        # (the sync in challenges.py computes what survives, what is
+        # superseded, and what is newly minted; nothing is dropped
+        # here). A reader never sees a half-written shelf.
+        with self._lock:
+            self._conn.execute(
+                self._sql("DELETE FROM challenges WHERE case_id = ?"),
+                (case_id,),
+            )
+            for record in records:
+                self._conn.execute(
+                    self._sql(
+                        "INSERT INTO challenges"
+                        " (challenge_id, case_id, status, payload, created_at)"
+                        " VALUES (?, ?, ?, ?, ?)"
+                    ),
+                    (
+                        record["challenge_id"],
+                        case_id,
+                        record["status"],
+                        json.dumps(record),
+                        record["created_at"],
+                    ),
+                )
+            self._conn.commit()
+        return records
+
+    def list_challenges(self, case_id: str) -> list[dict]:
+        rows = self._fetchall(
+            "SELECT payload FROM challenges WHERE case_id = ?"
+            " ORDER BY challenge_id",
+            (case_id,),
+        )
+        return [json.loads(r["payload"]) for r in rows]
+
+    def get_challenge(self, case_id: str, challenge_id: str) -> dict | None:
+        row = self._fetchone(
+            "SELECT payload FROM challenges"
+            " WHERE case_id = ? AND challenge_id = ?",
+            (case_id, challenge_id),
+        )
+        return json.loads(row["payload"]) if row else None
+
+    def update_challenge(self, case_id: str, record: dict) -> dict:
+        self._execute(
+            "UPDATE challenges SET status = ?, payload = ?"
+            " WHERE case_id = ? AND challenge_id = ?",
+            (
+                record["status"],
+                json.dumps(record),
+                case_id,
+                record["challenge_id"],
+            ),
+        )
+        return record
+
     # -- virtual filesystem index ---------------------------------------------
     def put_file_meta(self, case_id: str, path: str, sha256: str, size: int) -> None:
         existing = self.get_file_meta(case_id, path)
