@@ -54,6 +54,7 @@ from .ledger import verify_ledger
 from .llm import build_model, model_label
 from .models import PRIORITIES, BudgetIn, BriefIn
 from .objects import ObjectStore, build_object_store, sha256_hex
+from .portfolio import build_portfolio, member_cases, summarize_portfolio
 from .profiles import ProfileError, load_profile
 from .promotion import ProfileGate
 from .report_model import export_report, model_sections
@@ -332,6 +333,11 @@ class CaseService:
             # is a recorded act, and neither gates anything.
             "assignee": None,
             "priority": "normal",
+            # Portfolio mode (R15): the engagement (client
+            # mandate) this case runs under, or None. Starts
+            # unset on every case; assignment is a recorded act,
+            # and membership changes nothing inside the case.
+            "engagement_id": None,
             "brief": brief.model_dump(),
             "usage": {},
             # Long-case continuity (R9): workstreams that evidence
@@ -2345,10 +2351,185 @@ class CaseService:
         self._require_case(case_id)
         return build_timeline(self.store, case_id)
 
-    def search_cases(self, query: str) -> list[dict]:
+    def search_cases(
+        self, query: str, engagement_id: str | None = None
+    ) -> list[dict]:
         """Deterministic text search over subjects, brief
-        questions, and finding claims (see workbench.py)."""
-        return _search_cases(self.store, query)
+        questions, and finding claims (see workbench.py). With
+        an engagement named, the search is scoped to that
+        engagement's member cases; the results stay case-scoped
+        and case-labelled either way — scoping narrows the desk,
+        it never merges cases."""
+        case_ids = None
+        if engagement_id is not None:
+            if self.store.get_engagement(engagement_id) is None:
+                raise KeyError(engagement_id)
+            case_ids = {
+                case["case_id"]
+                for case in member_cases(self.store, engagement_id)
+            }
+        return _search_cases(self.store, query, case_ids=case_ids)
+
+    # -- portfolio mode -----------------------------------------------------
+    def create_engagement(
+        self, analyst: str, name: str, client: str, owner: str
+    ) -> dict:
+        """Open an engagement: a client mandate under which
+        cases run. A governed record, created as a recorded act
+        — the creator is on the record, and the record carries
+        its own history from this first entry. An engagement
+        groups cases; it holds no case state and decides
+        nothing."""
+        for field, value in (("name", name), ("client", client), ("owner", owner)):
+            if not (value or "").strip():
+                raise ValueError(f"an engagement needs a {field}")
+        now = utcnow()
+        record = self.store.add_engagement(
+            {
+                "name": name.strip(),
+                "client": client.strip(),
+                "owner": owner.strip(),
+                "created_by": analyst,
+                "created_at": now,
+                "updated_at": now,
+                "history": [
+                    {"action": "created", "analyst": analyst, "at": now}
+                ],
+            }
+        )
+        log.info(
+            "engagement %s created by %s (%s)",
+            record["engagement_id"],
+            analyst,
+            record["name"],
+        )
+        return record
+
+    def assign_case_engagement(
+        self, case_id: str, engagement_id: str | None, analyst: str
+    ) -> dict:
+        """Put a case under an engagement — or take it out of
+        one. A recorded act on both records: the case's audit
+        trail names the engagement and what it replaced, and
+        each engagement's history names the case that arrived or
+        left, and from or to where. A case sits in at most one
+        engagement, so a move writes both sides; nothing about
+        the case itself — its gates, budget, evidence, or
+        retention — is touched. Asking for the membership the
+        case already has is not an act and is refused."""
+        case = self._require_case(case_id)
+        current_id = case.get("engagement_id") or None
+        target = None
+        if engagement_id is not None:
+            target = self.store.get_engagement(engagement_id)
+            if target is None:
+                raise KeyError(engagement_id)
+        if engagement_id == current_id:
+            raise GateError(
+                f"case {case_id} is already "
+                + (
+                    f"in engagement {engagement_id}"
+                    if engagement_id
+                    else "outside any engagement"
+                )
+                + "; a membership that does not change is not an act"
+            )
+        now = utcnow()
+        case = self.store.update_case(case_id, engagement_id=engagement_id)
+        previous = None
+        if current_id is not None:
+            previous = self.store.get_engagement(current_id)
+            entry = {
+                "action": "case_unassigned",
+                "case_id": case_id,
+                "analyst": analyst,
+                "at": now,
+                "to_engagement_id": engagement_id,
+            }
+            if previous is not None:
+                previous["history"] = list(
+                    previous.get("history") or []
+                ) + [entry]
+                previous["updated_at"] = now
+                self.store.update_engagement(previous)
+        if target is not None:
+            entry = {
+                "action": "case_assigned",
+                "case_id": case_id,
+                "analyst": analyst,
+                "at": now,
+                "from_engagement_id": current_id,
+            }
+            target["history"] = list(target.get("history") or []) + [entry]
+            target["updated_at"] = now
+            self.store.update_engagement(target)
+        if engagement_id is not None:
+            self.store.add_audit(
+                case_id,
+                "case_assigned_to_engagement",
+                {
+                    "analyst": analyst,
+                    "engagement_id": engagement_id,
+                    "engagement_name": target["name"],
+                    "previous_engagement_id": current_id,
+                },
+            )
+        else:
+            previous_name = previous["name"] if previous else None
+            self.store.add_audit(
+                case_id,
+                "case_removed_from_engagement",
+                {
+                    "analyst": analyst,
+                    "engagement_id": current_id,
+                    "engagement_name": previous_name,
+                },
+            )
+        log.info(
+            "case %s engagement %s -> %s by %s",
+            case_id,
+            current_id,
+            engagement_id,
+            analyst,
+        )
+        return case
+
+    def portfolio_report(self, engagement_id: str) -> dict:
+        """One engagement's portfolio report: the fold over its
+        member cases (see portfolio.py) — counts by state, the
+        gates awaiting decision across the portfolio (the
+        workbench queue's own items, scoped to members), the
+        open conflicts and quarantined claims by id, and the
+        cost roll-up summed from the cases' own ledgers. The
+        queue build runs the interrupted-case scan, as every
+        queue read does."""
+        engagement = self.store.get_engagement(engagement_id)
+        if engagement is None:
+            raise KeyError(engagement_id)
+        return build_portfolio(
+            self.store,
+            engagement,
+            self.workbench_queue(),
+            self.settings.retention_days,
+            currency=self.price_table.currency,
+        )
+
+    def list_portfolios(self) -> list[dict]:
+        """Every engagement's summary, folded the same way as
+        the full report (one queue build serves them all)."""
+        queue = self.workbench_queue()
+        return [
+            summarize_portfolio(
+                build_portfolio(
+                    self.store,
+                    engagement,
+                    queue,
+                    self.settings.retention_days,
+                    currency=self.price_table.currency,
+                )
+            )
+            for engagement in self.store.list_engagements()
+        ]
 
     def save_view(self, analyst: str, name: str, filters: dict) -> dict:
         """Save a queue filter under the analyst's name.

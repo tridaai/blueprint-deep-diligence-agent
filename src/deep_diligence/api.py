@@ -27,6 +27,8 @@ from .models import (
     ConflictNoteIn,
     DecisionIn,
     DeleteCaseIn,
+    EngagementAssignIn,
+    EngagementIn,
     EvidenceIn,
     HoldIn,
     NoteIn,
@@ -403,6 +405,30 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return CaseOut(**case).model_dump()
 
+    @app.post(
+        "/api/cases/{case_id}/engagement",
+        dependencies=[Depends(require_api_key)],
+    )
+    def set_case_engagement(
+        case_id: str, request: EngagementAssignIn
+    ) -> dict:
+        # Membership is a recorded act on both records (the
+        # case's audit trail, the engagement's history). It is
+        # triage, not a decision: it moves no gate, budget,
+        # evidence, or retention state.
+        get_case_or_404(case_id)
+        try:
+            case = service.assign_case_engagement(
+                case_id, request.engagement_id, request.analyst
+            )
+        except KeyError:
+            raise HTTPException(
+                status_code=404, detail="engagement not found"
+            ) from None
+        except GateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return CaseOut(**case).model_dump()
+
     @app.get("/api/cases/{case_id}/workstreams")
     def get_workstreams(case_id: str) -> list[dict]:
         get_case_or_404(case_id)
@@ -723,9 +749,18 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get("/api/workbench/search")
-    def workbench_search(q: str = "") -> list[dict]:
+    def workbench_search(
+        q: str = "", engagement_id: str | None = None
+    ) -> list[dict]:
+        # With an engagement named, the search is scoped to its
+        # member cases; hits stay case-scoped and case-labelled
+        # either way.
         try:
-            return service.search_cases(q)
+            return service.search_cases(q, engagement_id=engagement_id)
+        except KeyError:
+            raise HTTPException(
+                status_code=404, detail="engagement not found"
+            ) from None
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -756,6 +791,55 @@ def create_app(
                 status_code=404, detail="saved view not found"
             ) from None
         return {"deleted": view["view_id"], "name": view["name"]}
+
+    # -- portfolio mode ------------------------------------------------------
+    # Engagements group cases under a client mandate. These
+    # routes create the grouping and read the fold over it —
+    # note what is NOT here, by design: no portfolio-level
+    # decision, approval, or deletion route. Every gate stays
+    # one case, one analyst, on the case's own endpoints.
+    @app.post(
+        "/api/engagements",
+        status_code=201,
+        dependencies=[Depends(require_api_key)],
+    )
+    def create_engagement(request: EngagementIn) -> dict:
+        try:
+            return service.create_engagement(
+                request.analyst, request.name, request.client, request.owner
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/api/engagements")
+    def list_engagements() -> list[dict]:
+        return service.store.list_engagements()
+
+    @app.get("/api/engagements/{engagement_id}")
+    def get_engagement(engagement_id: str) -> dict:
+        record = service.store.get_engagement(engagement_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="engagement not found")
+        return record
+
+    @app.get("/api/portfolio")
+    def list_portfolios() -> list[dict]:
+        # Every engagement's summary: counts by state, open
+        # gates with the oldest wait, the cost total, and the
+        # held / past-retention member counts.
+        return service.list_portfolios()
+
+    @app.get("/api/portfolio/{engagement_id}")
+    def get_portfolio(engagement_id: str) -> dict:
+        # The full fold: member cases with grades and retention
+        # standing, the portfolio's gates, open conflicts and
+        # quarantined claims by id, and the cost roll-up.
+        try:
+            return service.portfolio_report(engagement_id)
+        except KeyError:
+            raise HTTPException(
+                status_code=404, detail="engagement not found"
+            ) from None
 
     # -- profile regression gate -------------------------------------------
     # The active profile is read from the promotion log; the only
