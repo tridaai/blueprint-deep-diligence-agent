@@ -24,6 +24,16 @@ configured, a model check runs alongside as an advisory signal: it
 sees only the claim and its cited evidence (no findings, no other
 claims), and its verdict is recorded on the check — but the
 deterministic checks decide quarantine, so the gate holds offline.
+
+Figures and dates are judged against the cited document's own fact
+ledger — its "Key facts" section — when the document carries one.
+A document's prose can say many things its ledger does not state:
+a pro-forma aside, a quoted third party, a number its own results
+table contradicts. The ledger is what the document asserts as fact,
+so a figure that appears only in prose does not support a claim.
+Documents with no ledger (an analyst's free-text upload) are judged
+against their full text, as before. Named entities are still judged
+against the full text: a name is context, not a figure.
 """
 
 from __future__ import annotations
@@ -42,6 +52,8 @@ MONTH_YEAR = re.compile(
     r"\b(?:January|February|March|April|May|June|July|August|"
     r"September|October|November|December)\s+\d{4}\b"
 )
+LEDGER_HEADING = "## Key facts"
+LEDGER_LINE = re.compile(r"^- \[(F-[A-Z]+-\d+)\] (.*)$", re.MULTILINE)
 CAP_TOKEN = re.compile(r"^[A-Z][A-Za-z0-9'’-]*$|^[A-Z]{2,}$")
 CODE_TOKEN = re.compile(r"^[A-Z][A-Z0-9]*[-]?\d[\w-]*$|^\d{3,}$")
 CONNECTORS = {"of", "the", "&", "and"}
@@ -51,6 +63,40 @@ REASON_ORDER = (
     "date_not_in_evidence",
     "entity_mismatch",
 )
+
+
+def ledger_facts(text: str) -> dict[str, str]:
+    """The facts a document asserts, as {fact_id: fact_text}, read
+    from its Key facts ledger. A document's ledger is the section
+    the document format appends last, so when a body carries an
+    earlier section with the same heading — a planted lookalike —
+    the final one is the ledger and the lookalike is prose. A
+    document with no ledger section asserts no facts and returns
+    an empty dict."""
+    index = text.rfind(f"\n{LEDGER_HEADING}\n")
+    if index == -1:
+        if not text.startswith(f"{LEDGER_HEADING}\n"):
+            return {}
+        section = text
+    else:
+        section = text[index + 1:]
+    return {m.group(1): m.group(2).strip() for m in LEDGER_LINE.finditer(section)}
+
+
+def ledger_text(text: str) -> str | None:
+    """The document's ledger section as one text, or None when the
+    document carries no ledger."""
+    facts = ledger_facts(text)
+    if not facts:
+        return None
+    return "\n".join(facts.values())
+
+
+def _support_texts(texts: list[str]) -> list[str]:
+    """What figures and dates are judged against: each cited
+    document's fact ledger where it carries one, its full text
+    where it does not."""
+    return [ledger_text(text) or text for text in texts]
 
 
 def _figures(text: str) -> list[str]:
@@ -130,8 +176,9 @@ def check_claim(claim: str, evidence_texts: list[str]) -> list[dict]:
     the evidence it cites. Returns a list of failures (empty = the
     claim is supported by its citations)."""
     failures: list[dict] = []
+    support = _support_texts(evidence_texts)
     for token in _figures(claim):
-        if not _present(token, evidence_texts):
+        if not _present(token, support):
             failures.append(
                 {
                     "reason": "figure_not_in_evidence",
@@ -139,7 +186,7 @@ def check_claim(claim: str, evidence_texts: list[str]) -> list[dict]:
                 }
             )
     for token in _dates(claim):
-        if not _present(token, evidence_texts):
+        if not _present(token, support):
             failures.append(
                 {
                     "reason": "date_not_in_evidence",
