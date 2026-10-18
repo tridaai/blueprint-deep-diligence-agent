@@ -424,6 +424,22 @@ offline model and grades:
   variant scopes the independent branch's only document out of the
   case, and that branch must end empty — its question NOT COVERED
   with the reason named — while the case still drafts
+- **Red-team pack** — six adversarial scenarios grade the defences
+  themselves, per attack and at zero tolerance: poisoned evidence
+  whose prose contradicts its own table, a citation-bait document
+  titled for claims it never makes, instruction injection inside
+  a document (a fake system notice, a fake prior finding, a fake
+  fact ledger planted in the body), brief-level attacks (an
+  unregistered source, a question whose only sources are out of
+  scope, an instruction smuggled into a question), and cross-case
+  citation. Every attack must be held, and injected figures in
+  final reports, cross-case citations accepted, out-of-scope
+  answers, and poisoned claims in reports must all be 0. Two of
+  the attacks succeeded against the defences as they stood and
+  drove fixes (the verifier now judges figures against the cited
+  document's own fact ledger; `record_finding` checks a fact
+  reference against that ledger) — the full account, before and
+  after, is `docs/red-team.md`
 
 Current results (offline stub): recall **1.000** on all four cases,
 citation completeness and correctness **1.000**, budgets compliant;
@@ -440,8 +456,9 @@ DRAFT_READY with recall **1.000**. The dependency packs both pass:
 the chain's schedule and handoff grade clean at recall **1.000**,
 and the failure variant's missing branch ends empty with its
 question NOT COVERED and the reason named, the case at
-DRAFT_READY. The pytest suite
-(214 tests) covers the gates, the budget caps, the evidence backend,
+DRAFT_READY. The red-team pack holds all 21
+attacks with its four counters at zero. The pytest suite
+(232 tests) covers the gates, the budget caps, the evidence backend,
 the citation rules, the ledger's drift gate, the verifier and
 quarantine, conflict detection and handling, per-phase budgets,
 the budget ledger, the partial-report protocol, amendment, the
@@ -471,7 +488,10 @@ bases, the cost ledger folding exactly by phase, role, and model
 against the budget ledger's own token counts, the price-version
 pinning (an edited table moves nothing recorded), the unpriced
 model, and the budget-vs-actual report on the budget-tight case
-through amendment and re-run.
+through amendment and re-run, and the red-team defences: the
+verifier's ledger rule, record_finding's ledger and case-scope
+checks, the intake refusal, and the pack itself held as
+regression cases.
 
 The eval runner also runs the packs under any other profile —
 `python evals/run_evals.py --profile openai-gpt` — with the report
@@ -605,7 +625,8 @@ src/deep_diligence/
                   grades, risks and open items from records, and
                   the HTML renderer + JSON export of the one model
   corpus.py       the bundled evidence corpus (generated for this
-                  blueprint) and the gold case packs
+                  blueprint), the gold case packs, and the
+                  red-team pack
   store.py        case store port (SQLite local, PostgreSQL production)
   objects.py      object-store port (local directory, S3-compatible)
   static/         the console (one static HTML file)
