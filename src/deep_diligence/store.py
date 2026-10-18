@@ -1167,6 +1167,55 @@ class Store:
         )
         return record
 
+    # -- operations digests -----------------------------------------------------
+    # Stored, versioned snapshots (observability.py folds them;
+    # this table only keeps them). Append-only by construction —
+    # insert and read methods, no update or delete — because a
+    # regenerated digest is a NEW snapshot of the day, and the one
+    # the desk read yesterday must keep saying what it said.
+    def add_digest(self, record: dict) -> dict:
+        with self._lock:
+            row = self._fetchone(
+                "SELECT COALESCE(MAX(version), 0) AS v"
+                " FROM operations_digests WHERE day = ?",
+                (record["day"],),
+            )
+            record = {**record, "version": int(row["v"]) + 1}
+            self._execute(
+                "INSERT INTO operations_digests"
+                " (day, version, payload, generated_at, generated_by)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (
+                    record["day"],
+                    record["version"],
+                    json.dumps(record),
+                    record["generated_at"],
+                    record["generated_by"],
+                ),
+            )
+        return record
+
+    def get_digest(self, day: str) -> dict | None:
+        """The latest stored version of a day's digest, or None —
+        an ungenerated day reads as absent, never as an empty
+        digest."""
+        row = self._fetchone(
+            "SELECT payload FROM operations_digests WHERE day = ?"
+            " ORDER BY version DESC LIMIT 1",
+            (day,),
+        )
+        return json.loads(row["payload"]) if row else None
+
+    def list_digests(self) -> list[dict]:
+        """Every stored digest version, oldest day first, version
+        ascending — the full snapshot history, not just the
+        latest per day."""
+        rows = self._fetchall(
+            "SELECT payload FROM operations_digests"
+            " ORDER BY day, version"
+        )
+        return [json.loads(r["payload"]) for r in rows]
+
     # -- audit ------------------------------------------------------------------
     def add_audit(self, case_id: str, event: str, payload: dict | None = None) -> None:
         self._execute(

@@ -251,6 +251,14 @@ class WorkbenchViewIn(BaseModel):
     filters: dict[str, Any] = Field(default_factory=dict)
 
 
+class DigestIn(BaseModel):
+    """Generating a day's operations digest is a recorded act:
+    the analyst who generated it is stamped on the stored
+    snapshot beside the time, the way every other act in this
+    shell names its actor."""
+    analyst: str = Field(min_length=1, max_length=120)
+
+
 class ProfileEvaluateIn(BaseModel):
     candidate_id: str = Field(min_length=1, max_length=120)
     analyst: str = Field(min_length=1, max_length=120)

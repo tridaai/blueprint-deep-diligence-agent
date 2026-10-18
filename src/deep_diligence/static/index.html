@@ -85,6 +85,8 @@
     <div id="skills"><p class="muted">Loading…</p></div>
     <h2>Source governance</h2>
     <div id="governance"><p class="muted">Loading…</p></div>
+    <h2>Operations digest</h2>
+    <div id="digests"><p class="muted">Loading…</p></div>
   </aside>
   <section id="detail">
     <p class="muted">Pick a case, or create one from a sample brief.</p>
@@ -378,7 +380,7 @@ async function openCase(caseId) {
       ${bar("Steps", phase.consumed.steps, phase.granted.max_steps)}
       ${bar("Tokens", phase.consumed.tokens, phase.granted.max_tokens)}`;
   };
-  const [plan, findings, evidence, audit, timeline, report, ledger, verification, quarantine, conflicts, challenges, workstreams, checkpoint, notes, versions, provenance, caseSources, redactionData, sectionNotes, costReport] = await Promise.all([
+  const [plan, findings, evidence, audit, timeline, report, ledger, verification, quarantine, conflicts, challenges, workstreams, checkpoint, notes, versions, provenance, caseSources, redactionData, sectionNotes, costReport, trace] = await Promise.all([
     api(`/api/cases/${caseId}/plan`).catch(() => null),
     api(`/api/cases/${caseId}/findings`),
     api(`/api/cases/${caseId}/evidence`),
@@ -399,6 +401,7 @@ async function openCase(caseId) {
     api(`/api/cases/${caseId}/redactions`).catch(() => ({redactions: [], flags: []})),
     api(`/api/cases/${caseId}/report/notes`).catch(() => []),
     api(`/api/cases/${caseId}/cost`).catch(() => null),
+    api(`/api/cases/${caseId}/trace`).catch(() => null),
   ]);
   const driftIds = new Set(((ledger && ledger.verification && ledger.verification.drift) || []).map(d => d.evidence_id));
   const canPlan = ["INTAKE", "PLAN_REJECTED"].includes(c.status);
@@ -646,6 +649,17 @@ async function openCase(caseId) {
       ${timeline.map(t => `<tr><td>${esc(t.ts)}</td><td>${esc(t.label)}</td><td>${esc(t.detail || "")}</td><td>${esc(t.actor || "")}</td></tr>`).join("")}
       </table>` : '<p class="muted">Nothing on the timeline yet.</p>'}
     </div>
+    ${trace ? `<div class="panel" style="margin-top:16px"><h3>Run trace — outcome: ${esc(trace.outcome.label)}</h3>
+      <p class="muted" style="margin-top:0">The run reconstructed from the stored records: the phase runs folded from the budget and cost ledgers, and every act in the order it happened. The outcome is the failure taxonomy's one verdict on this case. ${esc(trace.timing.note)}</p>
+      <div class="finding"><strong>Outcome detail</strong> — ${esc(JSON.stringify(trace.outcome.detail))}<br>
+      <span class="muted">findings ${trace.counts.findings} · claims ${trace.counts.claims} · quarantined standing ${trace.counts.quarantined_standing} · conflicts ${trace.counts.conflicts} · challenges open ${trace.counts.challenges_open} of ${trace.counts.challenges_total} · priced cost $${esc(trace.cost.total_usd)}${trace.cost.contains_estimates ? " (contains estimates)" : ""}</span></div>
+      ${trace.runs.length ? `<table><tr><th>Run</th><th>Phase</th><th>Granted (steps / tokens)</th><th>Consumed</th><th>Cost</th><th>Tripped</th></tr>
+      ${trace.runs.map(r => `<tr><td>${r.index}${r.attempt ? ` (attempt ${r.attempt})` : ""}</td><td>${esc(r.phase)}</td><td>${r.caps ? `${esc(String(r.caps.max_steps))} / ${esc(String(r.caps.max_tokens))}` : "—"}</td><td>${r.consumed ? `${esc(String(r.consumed.steps))} steps · ${esc(String(r.consumed.tokens))} tokens · ${esc(String(r.consumed.subagents))} spawns · ${esc(String(r.consumed.wall_seconds))}s` : "not recorded"}</td><td>${r.cost ? "$" + esc(r.cost.total_usd) : "—"}</td><td>${r.exceeded ? `${esc(r.exceeded.kind)} at ${esc(String(r.exceeded.observed))} (limit ${esc(String(r.exceeded.limit))})` : "—"}</td></tr>`).join("")}
+      </table>` : '<p class="muted">No runs yet.</p>'}
+      ${trace.acts.length ? `<table><tr><th>#</th><th>Time</th><th>Kind</th><th>Act</th><th>Detail</th></tr>
+      ${trace.acts.map(a => `<tr><td>${a.seq}</td><td>${esc(a.ts)}</td><td>${esc(a.kind)}</td><td>${esc(a.label)}</td><td>${esc(JSON.stringify(a.detail))}</td></tr>`).join("")}
+      </table>` : ""}
+    </div>` : ""}
     <div class="panel" style="margin-top:16px"><h3>Audit trail (${audit.length})</h3>
       <table><tr><th>Time</th><th>Event</th><th>Detail</th></tr>
       ${audit.map(a => `<tr><td>${esc(a.ts)}</td><td>${esc(a.event)}</td><td>${esc(JSON.stringify(a.payload))}</td></tr>`).join("")}
@@ -1007,6 +1021,59 @@ async function refreshGovernance() {
     box.innerHTML = `<p class="muted">Governance unavailable: ${esc(e.message)}</p>`;
   }
 }
+async function refreshDigests() {
+  const box = $("#digests");
+  if (!box) return;
+  try {
+    const stored = await api("/api/digests");
+    const today = new Date().toISOString().slice(0, 10);
+    const latestByDay = {};
+    stored.forEach(r => { latestByDay[r.day] = r; });
+    const days = Object.keys(latestByDay).sort().reverse();
+    box.innerHTML = `
+      <p class="muted" style="margin:4px 0">One day of the desk, folded from the case records: cases opened and closed, gate decisions, partial reports still standing with their uncovered questions, the day's priced cost, outcome counts, and the must-answer challenges still open, with their ages. Generating stores a new version of the day; earlier versions are never rewritten.</p>
+      <div class="row" style="margin:0 0 5px">
+        <input id="dg-day" type="date" value="${today}" style="flex:1">
+        <button class="secondary" id="dg-view">View</button>
+      </div>
+      <button class="wide" id="dg-generate">Generate digest for the day</button>
+      <div id="dg-body" style="margin-top:8px"></div>
+      ${days.length ? `<h3 style="margin:14px 0 4px">Stored digests</h3>` + days.map(d => { const r = latestByDay[d]; const versions = stored.filter(x => x.day === d).length; return `<div style="border-top:1px solid var(--line);padding:5px 0"><strong>${esc(d)}</strong> <span class="muted">v${r.version}${versions > 1 ? ` (${versions} versions)` : ""} · by ${esc(r.generated_by)} · ${esc(r.generated_at)}</span></div>`; }).join("") : '<p class="muted">No digests stored yet.</p>'}
+    `;
+    const render = (record) => {
+      const body = $("#dg-body");
+      if (!record) { body.innerHTML = '<p class="muted">No digest stored for this day — an ungenerated day reads as absent.</p>'; return; }
+      const d = record.digest;
+      body.innerHTML = `<div class="finding"><strong>${esc(record.day)}</strong> — digest v${record.version}, generated by ${esc(record.generated_by)}<br>
+        <span class="muted">cases opened ${d.cases.opened_count} · closed ${d.cases.closed_count} · cost $${esc(d.cost.total_usd)}${d.cost.contains_estimates ? " (contains estimates)" : ""} across ${d.cost.runs_recorded} recorded run(s)</span><br>
+        gates: plan approved ${d.gate_decisions.plan_approved} · plan rejected ${d.gate_decisions.plan_rejected} · report approved ${d.gate_decisions.report_approved} · report rejected ${d.gate_decisions.report_rejected}<br>
+        outcomes: ${esc(Object.entries(d.taxonomy).map(([k, v]) => `${k} ${v}`).join(" · ") || "none")}<br>
+        challenges: raised ${d.challenges.raised} · answered ${d.challenges.answered} · must-answer open ${d.challenges.open_must_answer.length}
+        ${d.challenges.open_must_answer.map(c => `<br><span class="muted">${esc(c.challenge_id)} (${esc(c.rule)}) on ${esc(c.case_id)} — open ${Math.floor(c.age_seconds / 3600)}h ${Math.floor((c.age_seconds % 3600) / 60)}m</span>`).join("")}
+        ${d.partial_reports.map(p => `<br>partial report standing: ${esc(p.subject)} — tripped ${esc(p.exceeded_kind || "?")} in ${esc(p.exceeded_phase || "?")}; uncovered: ${esc(p.uncovered.join(", ") || "none")}`).join("")}
+      </div>`;
+    };
+    const view = async () => {
+      const day = $("#dg-day").value;
+      try { render(await api(`/api/digests/${day}`)); }
+      catch { render(null); }
+    };
+    $("#dg-view").addEventListener("click", view);
+    $("#dg-generate").addEventListener("click", async (ev) => {
+      ev.target.disabled = true;
+      const day = $("#dg-day").value;
+      try {
+        await api(`/api/digests/${day}`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({analyst: "Console Analyst"})});
+      } catch (e) { alert(e.message); }
+      await refreshDigests();
+      const input = $("#dg-day");
+      if (input) { input.value = day; await view(); }
+    });
+    await view();
+  } catch (e) {
+    box.innerHTML = `<p class="muted">Digests unavailable: ${esc(e.message)}</p>`;
+  }
+}
 async function init() {
   try {
     const ready = await api("/readiness");
@@ -1026,6 +1093,7 @@ async function init() {
   await refreshProfiles();
   await refreshSkills();
   await refreshGovernance();
+  await refreshDigests();
 }
 init();
 </script>

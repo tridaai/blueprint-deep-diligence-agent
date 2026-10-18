@@ -18,6 +18,7 @@ import json
 import logging
 import re
 import uuid
+from datetime import datetime
 from decimal import Decimal
 
 from langchain_core.messages import HumanMessage
@@ -55,6 +56,7 @@ from .ledger import verify_ledger
 from .llm import build_model, model_label
 from .models import PRIORITIES, BudgetIn, BriefIn
 from .objects import ObjectStore, build_object_store, sha256_hex
+from .observability import build_trace, classify_case_outcome, fold_digest
 from .portfolio import build_portfolio, member_cases, summarize_portfolio
 from .profiles import ProfileError, load_profile
 from .promotion import ProfileGate
@@ -107,6 +109,29 @@ def _aggregate_execution_usage(
         "interrupted_spawns": (tripped or {}).get("interrupted_spawns", []),
     }
     return total
+
+
+def _validate_digest_day(day: str) -> str:
+    """A digest is keyed by the day it summarises: an ISO
+    calendar date, exactly YYYY-MM-DD, that actually exists. A
+    digest keyed by a date nobody can read back — or a string
+    that merely looks like one — is refused here, at generation
+    and at read, in the service's own words."""
+    try:
+        parsed = datetime.strptime(day, "%Y-%m-%d")
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"digest day {day!r} is not an ISO calendar date "
+            "(YYYY-MM-DD); a digest is keyed by the day it "
+            "summarises"
+        ) from None
+    if parsed.strftime("%Y-%m-%d") != day:
+        raise ValueError(
+            f"digest day {day!r} is not an ISO calendar date "
+            "(YYYY-MM-DD); a digest is keyed by the day it "
+            "summarises"
+        )
+    return day
 
 
 class CaseService:
@@ -2950,3 +2975,46 @@ class CaseService:
             raise KeyError(view_id)
         self.store.delete_view(view_id)
         return view
+
+    # -- observability ---------------------------------------------------------
+
+    def case_trace(self, case_id: str) -> dict:
+        """The case's run, reconstructed end to end from its
+        stored records (observability.build_trace): the phase
+        runs folded from the budget and cost ledgers, the act
+        sequence in causal order, and the taxonomy's verdict on
+        how the run ended. A pure read — building it writes
+        nothing."""
+        self._require_case(case_id)
+        return build_trace(self.store, case_id)
+
+    def case_outcome(self, case_id: str) -> dict:
+        """The taxonomy's verdict on one case (observability.
+        classify_case_outcome): exactly one label, with the
+        records that decided it named in the detail."""
+        self._require_case(case_id)
+        return classify_case_outcome(self.store, case_id)
+
+    def generate_digest(self, day: str, analyst: str) -> dict:
+        """Generate a day's operations digest and store it as the
+        day's next version. The fold (observability.fold_digest)
+        recomputes everything from the case records as they stand
+        now; the stored record is the snapshot — day, version,
+        who generated it and when, and the fold itself. Earlier
+        versions of the day are never rewritten."""
+        day = _validate_digest_day(day)
+        record = {
+            "day": day,
+            "generated_at": utcnow(),
+            "generated_by": analyst,
+            "digest": fold_digest(self.store, day),
+        }
+        return self.store.add_digest(record)
+
+    def get_digest(self, day: str) -> dict | None:
+        """The latest stored version of a day's digest, or None —
+        an ungenerated day reads as absent."""
+        return self.store.get_digest(_validate_digest_day(day))
+
+    def list_digests(self) -> list[dict]:
+        return self.store.list_digests()

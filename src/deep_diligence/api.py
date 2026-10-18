@@ -28,6 +28,7 @@ from .models import (
     ConflictNoteIn,
     DecisionIn,
     DeleteCaseIn,
+    DigestIn,
     EngagementAssignIn,
     EngagementIn,
     EvidenceIn,
@@ -417,6 +418,57 @@ def create_app(
         # changes in chronological order — rendered from the
         # records, nothing re-recorded to feed it.
         return service.case_timeline(case_id)
+
+    @app.get("/api/cases/{case_id}/trace")
+    def get_trace(case_id: str) -> dict:
+        get_case_or_404(case_id)
+        # The run, reconstructed: the phase runs folded from the
+        # budget and cost ledgers (grants, consumption, priced
+        # cost, the cap tripped if one tripped), the act sequence
+        # in the audit trail's causal order, and the taxonomy's
+        # verdict on how the run ended — folded from the stored
+        # records on every read, nothing stored to feed it.
+        return service.case_trace(case_id)
+
+    @app.get("/api/cases/{case_id}/outcome")
+    def get_outcome(case_id: str) -> dict:
+        get_case_or_404(case_id)
+        # The failure taxonomy's one verdict on this case:
+        # exactly one label, with the deciding records named.
+        return service.case_outcome(case_id)
+
+    @app.post(
+        "/api/digests/{day}",
+        status_code=201,
+        dependencies=[Depends(require_api_key)],
+    )
+    def generate_digest(day: str, body: DigestIn) -> dict:
+        # Generating a digest is a recorded act: the fold is
+        # recomputed from the case records as they stand and
+        # stored as the day's next version — earlier versions of
+        # the day are never rewritten.
+        try:
+            return service.generate_digest(day, body.analyst)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/api/digests/{day}")
+    def get_digest(day: str) -> dict:
+        try:
+            record = service.get_digest(day)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if record is None:
+            raise HTTPException(
+                status_code=404, detail=f"no digest stored for {day}"
+            )
+        return record
+
+    @app.get("/api/digests")
+    def list_digests() -> list[dict]:
+        # Every stored digest version, oldest day first — the
+        # snapshot history, not just the latest per day.
+        return service.list_digests()
 
     @app.post(
         "/api/cases/{case_id}/assignment",
