@@ -297,7 +297,7 @@ def test_findings_carry_the_pins_and_recall_holds(service):
             (p["name"], p["version"]) for p in finding.get("skills", [])
         }
         by_question.setdefault(finding["question_id"], set()).add(
-            pins or None
+            tuple(sorted(pins)) or None
         )
     assert by_question["q1"] == {(("revenue-bridge", 1),)}
     assert by_question["q2"] == {(("contradiction-hunting", 1),)}
