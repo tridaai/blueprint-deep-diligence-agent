@@ -65,7 +65,7 @@ from __future__ import annotations
 
 from .ledger import build_ledger
 from .objects import ObjectStore
-from .report_model import build_report_model, render_html, staleness_lines
+from .report_model import build_report_model, render_html, skill_lines, staleness_lines
 from .store import Store, utcnow
 
 
@@ -250,6 +250,7 @@ def _render_markdown(
     verification: dict | None = None,
     conflicts: list[dict] | None = None,
     staleness_decisions: list[dict] | None = None,
+    skill_notes: list[str] | None = None,
     summary: dict | None = None,
     grades: dict | None = None,
     open_items: dict | None = None,
@@ -413,6 +414,7 @@ def _render_markdown(
             "resolve: " + ", ".join(refused) + "."
         )
     lines += staleness_lines(staleness_decisions)
+    lines += skill_notes or []
     return "\n".join(lines) + "\n"
 
 
@@ -505,6 +507,7 @@ def compose_report(
             coverage_detail=coverage_detail,
             refused=refused,
             staleness_decisions=case.get("staleness_decisions"),
+            skill_notes=skill_lines(store, case),
         ),
         "claims": claims,
         "refused_claims": refused,
@@ -578,6 +581,7 @@ def apply_verification(
             refused=report["refused_claims"],
             verification=summary,
             staleness_decisions=case.get("staleness_decisions"),
+            skill_notes=skill_lines(store, case),
         ),
         "claims": claims,
         "coverage": _coverage(brief, claims),
@@ -648,6 +652,7 @@ def apply_conflicts(
             verification=report["verification"],
             conflicts=conflict_records,
             staleness_decisions=case.get("staleness_decisions"),
+            skill_notes=skill_lines(store, case),
             summary=model["executive_summary"],
             grades=grades,
             open_items=model["risks_and_open_items"],

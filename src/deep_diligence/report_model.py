@@ -204,6 +204,41 @@ def staleness_lines(decisions: list[dict] | None) -> list[str]:
     return lines
 
 
+def skill_lines(store: Store, case: dict) -> list[str]:
+    """The Method-and-limits lines for the skills the case's
+    workstreams ran under, folded from the findings' own
+    provenance stamps — one line per question that ran under
+    skills, naming the pinned versions the plan gate approved.
+    Shared by the report model and the composer's markdown
+    renderer, like staleness_lines, so no format can name a
+    method another omits. A case that ran under no skills grows
+    no line: the section names the methods that were actually in
+    force, never the library's catalogue."""
+    brief = case["brief"]
+    skills_by_question: dict[str, list[dict]] = {}
+    for finding in store.list_findings(case["case_id"]):
+        for pin in finding.get("skills") or []:
+            slot = skills_by_question.setdefault(finding["question_id"], [])
+            if pin not in slot:
+                slot.append(pin)
+    lines: list[str] = []
+    for question in brief["questions"]:
+        pins = skills_by_question.get(question["id"])
+        if pins:
+            named = ", ".join(
+                f"{pin['name']} v{pin['version']}" for pin in pins
+            )
+            lines.append(
+                f"Workstream {question['id']} "
+                f"({question['workstream']}) ran under governed "
+                f"skill(s): {named}. The method text was loaded "
+                "from the skills library at the pinned "
+                "version(s), and the findings carry the pins as "
+                "their provenance."
+            )
+    return lines
+
+
 def build_open_items(
     store: Store,
     case: dict,
@@ -392,35 +427,7 @@ def build_report_model(
             "did not resolve: " + ", ".join(report["refused_claims"]) + "."
         )
     method_notes += staleness_lines(case.get("staleness_decisions"))
-    # Skill provenance: the governed methods the workstreams ran
-    # under, folded from the findings' own stamps — one line per
-    # question that ran under skills, naming the pinned versions
-    # the plan gate approved. A case that ran under no skills
-    # grows no line: the section names the methods that were
-    # actually in force, never the library's catalogue.
-    workstream_by_question = {
-        q["id"]: q["workstream"] for q in brief["questions"]
-    }
-    skills_by_question: dict[str, list[dict]] = {}
-    for finding in store.list_findings(case_id):
-        for pin in finding.get("skills") or []:
-            slot = skills_by_question.setdefault(finding["question_id"], [])
-            if pin not in slot:
-                slot.append(pin)
-    for question in brief["questions"]:
-        pins = skills_by_question.get(question["id"])
-        if pins:
-            named = ", ".join(
-                f"{pin['name']} v{pin['version']}" for pin in pins
-            )
-            method_notes.append(
-                f"Workstream {question['id']} "
-                f"({workstream_by_question[question['id']]}) ran under "
-                f"governed skill(s): {named}. The method text was "
-                "loaded from the skills library at the pinned "
-                "version(s), and the findings carry the pins as "
-                "their provenance."
-            )
+    method_notes += skill_lines(store, case)
     return {
         "case_id": case_id,
         "subject": brief["subject"],
