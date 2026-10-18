@@ -397,6 +397,35 @@ is accountable for lives in our code around it:
   and decisions, every sub-agent spawn, budget events, composition,
   and report decisions are recorded per case and visible in the
   console.
+- **Observability: the trace, the taxonomy, the digest.** The
+  records above are the system of record, and three reads fold
+  them for the desk. The **run trace** (`GET
+  /api/cases/{id}/trace`, and a console panel) reconstructs one
+  case's run end to end: the phase runs folded from the budget
+  ledger — the caps each run was granted, what it consumed, what
+  it cost, the cap it tripped if it tripped one — and every
+  recorded act in causal order, from intake through the plan
+  gate, the waves and their outcomes, composition, verification,
+  the challenge pass, and the report gate. It stores nothing,
+  and it shows no per-act timings, because none were ever
+  recorded. The **failure taxonomy** (`GET
+  /api/cases/{id}/outcome`) is one function that names how a
+  case's run ended or what stands in its way — evidence drift,
+  budget exhaustion with its uncovered questions, a
+  challenge-blocked gate, an interrupted execution, a failed
+  workstream, standing quarantine, stale evidence, a gate
+  rejection, a partial or full completion — with the deciding
+  records named, under a documented rule order whose fallback
+  makes the classification total: every case gets exactly one
+  label. The **operations digest** (`POST /api/digests/{day}`)
+  folds a day across the desk — cases opened and closed, gate
+  decisions, partial reports still standing with their uncovered
+  questions, the day's priced cost recomputed from the cost
+  ledgers, taxonomy counts, and the must-answer challenges
+  still open desk-wide with their ages — and stores it as a
+  **versioned record**: regenerating a day mints the next
+  version beside the old ones, and an ungenerated day reads as
+  absent.
 - **Source governance.** Every source is a governed record — name,
   kind (filing, news, internal dataset, web), owner, usage basis
   (public, licensed, client-provided) — in a registry seeded from
@@ -571,8 +600,22 @@ and the report's Method section names what ran — while a
 role-mismatched name and an unknown name refuse at the gate,
 and a tool-widening version and a line-skipping version refuse
 at publish, the mid-case publish leaving the pinned case on
-version 1 and the next approved plan pinning version 2. The pytest suite
-(282 tests) covers the gates, the budget caps, the evidence backend,
+version 1 and the next approved plan pinning version 2. The
+observability pack grades the reader side: a gold case's trace
+covers every audit entry in causal order and folds its runs
+and priced cost from the budget and cost ledgers, the
+budget-tight case traces to its partial-report outcome with
+its class and uncovered questions named, the challenge pack's
+crafted case classifies challenge-blocked with its open
+must-answer pair, and the day's digest folds to the totals
+recomputed from the cases' own ledgers and keeps its figures
+when a second generation adds a case — while a sweep
+classifies every case the other packs produce (gold,
+integrity, both dependency packs, the clean challenge case,
+the red-team case, a rejected plan, a fresh intake) and
+asserts the taxonomy is total, with no terminal case in the
+in-progress fallback. The pytest suite
+(303 tests) covers the gates, the budget caps, the evidence backend,
 the citation rules, the ledger's drift gate, the verifier and
 quarantine, conflict detection and handling, per-phase budgets,
 the budget ledger, the partial-report protocol, amendment, the
@@ -621,7 +664,12 @@ any delivered format, and the skills library: the strict
 loader's refusals, the publish discipline, the plan-gate pins
 and refusals, the profile-relative tool rule at publish and at
 the gate, the read-only mount, finding provenance, and the
-byte-stability of skill-free cases.
+byte-stability of skill-free cases, and observability: the
+trace's act-for-act reconstruction and its ledger-folded runs,
+the taxonomy's twelve labels each met on its own scenario and
+its totality over the states a desk produces, and the digest
+fold — hand-computed totals, stacked versions, snapshots that
+do not move, and a generation that writes nothing to any case.
 
 The eval runner also runs the packs under any other profile —
 `python evals/run_evals.py --profile openai-gpt` — with the report
@@ -697,6 +745,14 @@ development profile needs none of it: SQLite at `./data/diligence.db`
   deployment's published versions live with its data and the
   shipped files remain the seed set; a store reset returns the
   library to the seeds.
+- Observability reads what the records hold, and no more. The
+  trace shows no per-act or per-step timing because no run
+  records it — the audit trail's second-resolution stamps and
+  the guard's per-run usage are the finest clocks the system
+  keeps. A digest classifies its cases as they stand when it
+  is generated, so a regenerated digest may disagree with its
+  own earlier version about the same day; both are kept,
+  because each was the truth when it was taken.
 - Budgets cap each run (planning and execution are guarded
   separately) rather than the case as a whole.
 - Costs are priced from the governed table's list rates, not from
@@ -761,6 +817,9 @@ src/deep_diligence/
   skills.py       the skills library: versioned method artifacts,
                   the fail-closed loader with its tool rule, the
                   startup seed, and the plan gate's pin resolution
+  observability.py the run trace folded from the stored records,
+                  the failure taxonomy (one function, total by
+                  construction), and the operations digest fold
   continuity.py   staleness keying: which workstreams a document
                   that arrived mid-case speaks to, scored in code
   governance.py   source governance: the registry and its corpus

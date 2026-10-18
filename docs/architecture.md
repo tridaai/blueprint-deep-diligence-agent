@@ -39,6 +39,7 @@ it, so they hold for any model the harness runs.
 | Verifier | `verifier.py` | Independent claim re-check: reads evidence bytes from the object store and re-derives support; quarantines unsupported claims |
 | Conflicts | `conflicts.py` | Deterministic keying of supported claims by (entity, metric, period); conflict records with both sides, source classes, and recency labels |
 | Workbench | `workbench.py` | The analyst queue derived from case records (grouped by act needed, oldest first), the merged case timeline, and deterministic case search; saved views in the store |
+| Observability | `observability.py` | The run trace folded from the stored records (runs from the budget/cost ledgers, every audit entry as one act), the failure taxonomy (one function, total by construction), and the operations digest fold — stored versioned by the service, never a counter |
 | Store | `store.py` | Case store port: SQLite (local) / PostgreSQL (production) |
 | Objects | `objects.py` | Object-store port: local dir / S3-compatible |
 | Corpus | `corpus.py` | Generated evidence corpus + gold case packs |
@@ -905,6 +906,88 @@ The skills eval pack therefore grades loading, gating, pinning,
 and provenance exactly, and claims no outcome difference for the
 method text itself; method compliance is a live-model property.
 
+## Observability
+
+Everything above writes records; round 18 builds the reader
+side (`observability.py`). Three reads, all folds over the
+stored records — none of them writes to a case, keeps a
+counter, or asks the harness anything — plus the one stored
+snapshot the round adds.
+
+**The run trace.** `build_trace` reconstructs one case's run
+end to end. The **runs** fold from the budget ledger in audit
+order: each `budget_granted` opens a run (phase, the caps it
+was granted, the profile it ran under), the guard's
+`budget_exceeded` and the run's `cost_recorded` entry attach
+to it, and `budget_consumed` closes it with the run's usage;
+an execution run is stamped with its attempt, the count of
+`execution_started` events before it, so re-executions and
+resumes read as the separate attempts they were. The **acts**
+are the audit trail itself, mapped entry for entry: intake,
+planning, the plan gate, execution with its waves and
+workstream finishes, composition, verification (quarantine,
+conflicts), the challenge pass and its dispositions, the
+report gate. Every entry becomes exactly one act in the
+trail's insertion order — causal order — and an event the act
+table does not name still appears, under a humanised label;
+the trace drops nothing. Beside the acts ride the counts
+(findings by question, claims, standing quarantine, conflicts,
+challenges), the verifier report's summary, and the case's
+priced cost total from the cost ledger's own fold. Timing is
+stated, not decorated: the trail's stamps are second-resolution
+and each run's usage (wall seconds included) was recorded, but
+no per-act, per-workstream, or per-tool-call durations exist
+anywhere in the records, so the trace shows none.
+
+**The failure taxonomy.** `classify_case_outcome` is one
+function with a documented rule order, first match wins:
+`evidence_drift` (the report record's flag) →
+`budget_exhausted` (cap, phase, and uncovered questions from
+the coverage table) → `challenge_blocked` (the open
+must-answer IDs) → `interrupted` (EXECUTING with an unclosed
+checkpoint; the attempt and its completed/pending split) →
+`workstream_failed` (the latest execution's failed branches,
+with their recorded errors) → `claims_quarantined` (the
+standing quarantine, with the verifier's reasons) →
+`stale_evidence` (the open marks) → `plan_rejected` /
+`report_rejected` (the gates' recorded refusals) →
+`completed_partial` (FINAL over the approval record's
+coverage table) → `completed` → `in_progress`, the fallback
+that names the standing status and makes the classification
+**total**: every case maps to exactly one label, so an
+unclassifiable outcome is impossible by construction, and the
+eval pack's sweep asserts the property over every case the
+other packs produce — a documented label for each, and no
+terminal case in the fallback. Where a fact competes (a draft
+can hold quarantined claims and open challenges at once), the
+rule order is the precedence, and the losing facts remain
+visible in the trace and the case view.
+
+**The operations digest.** `fold_digest` summarises one day
+across the desk, and the service stores the fold as a
+**versioned record** (`operations_digests`, migration 0013):
+generating is a recorded act (analyst, timestamp), appends the
+day's next version, and never rewrites an earlier snapshot;
+an ungenerated day reads as absent (`GET /api/digests/{day}`
+answers 404). Scope is stated on the fold: a case belongs to
+the day it was **opened** for the opened list, status counts,
+and taxonomy counts; events belong to the day of their audit
+timestamp — gate decisions, challenge answers, and cost (each
+priced line rides its run's `cost_recorded` entry, so a day's
+cost is the day its runs ended), summed in Decimal from the
+recorded lines by case and in total, never from a stored
+counter. A partial report is listed when it was composed that
+day and still stands, with the coverage table's uncovered and
+partial questions; a case amended and re-run the same day no
+longer stands partial, and the digest says so by omission.
+The challenge block counts the records minted that day and the
+dispositions taken that day, and lists the must-answer
+challenges still open **desk-wide**, each with its age at
+generation — the desk's live exposure, not the day's history.
+The console renders the trace on the case (outcome, runs, act
+table) and the digest in its own panel, with the stored
+versions listed.
+
 ## The virtual filesystem
 
 `EvidenceBackend` implements the Deep Agents `BackendProtocol` over
@@ -1236,3 +1319,16 @@ their defences were built — is `docs/red-team.md`.
   an older version approves a plan that names it only by holding
   the newer publish back, a deliberate consequence of keeping
   one pin rule.
+- Observability reads what the records hold, and no more. The
+  trace cannot show per-act or per-step timing because no run
+  records it — the trail's stamps are second-resolution and the
+  guard's per-run usage is the finest clock the system keeps.
+  The taxonomy classifies a case where it stands when asked:
+  its counts in a digest are the day's cases as they stand at
+  generation, so a regenerated digest may legitimately disagree
+  with its earlier version about the same day — which is why
+  both are kept. Gate refusals that leave no record (a defective
+  plan refused at approval, a skill the gate cannot pin) are
+  not outcomes: nothing terminal happened, and the case reads
+  in_progress at its gate, with the refusal living in the API's
+  409 and nowhere else.
