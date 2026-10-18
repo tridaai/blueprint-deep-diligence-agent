@@ -614,8 +614,14 @@ classifies every case the other packs produce (gold,
 integrity, both dependency packs, the clean challenge case,
 the red-team case, a rejected plan, a fresh intake) and
 asserts the taxonomy is total, with no terminal case in the
-in-progress fallback. The pytest suite
-(303 tests) covers the gates, the budget caps, the evidence backend,
+in-progress fallback. The deployment pack grades the boot seam:
+compositions are selected through the environment, the way a
+deployment selects them — local boots and runs the gold case
+end to end on the stub with the deployment recorded on the
+case, its runs, and its trace, while hosted without a database
+URL, local with a live default, hosted-self without its base
+URL, and an unknown profile name each refuse by name. The pytest suite
+(318 tests) covers the gates, the budget caps, the evidence backend,
 the citation rules, the ledger's drift gate, the verifier and
 quarantine, conflict detection and handling, per-phase budgets,
 the budget ledger, the partial-report protocol, amendment, the
@@ -669,7 +675,12 @@ trace's act-for-act reconstruction and its ledger-folded runs,
 the taxonomy's twelve labels each met on its own scenario and
 its totality over the states a desk produces, and the digest
 fold — hand-computed totals, stacked versions, snapshots that
-do not move, and a generation that writes nothing to any case.
+do not move, and a generation that writes nothing to any case,
+and deployment profiles: the settings-load refusals by name,
+the unnamed-settings seam standing, the deployment record on
+the case, its runs, and its trace, records from before the
+round reading unknown, and live permission at startup decided
+by the promotion log.
 
 The eval runner also runs the packs under any other profile —
 `python evals/run_evals.py --profile openai-gpt` — with the report
@@ -699,9 +710,50 @@ stateless API, PostgreSQL (pgvector image; the store port is the same
 one SQLite serves locally), and SeaweedFS's S3 gateway (service name
 `minio`, bucket `diligence-evidence`) for evidence and file bytes.
 Migrations in `migrations/` are numbered and applied at startup.
-`/readiness` reports the store, object, and model profiles. The
+`/readiness` reports the store, object, and model profiles, and —
+since the deployment-profiles round — the deployment profile and
+the active harness profile. The
 development profile needs none of it: SQLite at `./data/diligence.db`
 (env `SQLITE_PATH`) and a local object directory.
+
+## Deployment profiles
+
+A deployment is a composition — store, object storage, harness
+default, live-model permission — and `DEPLOYMENT_PROFILE` names
+it as one of three, validated as a whole at settings load. An
+invalid combination refuses loudly by name (`ConfigError`)
+instead of half-working:
+
+- **`local`** — SQLite, the local object directory, the offline
+  stub harness as the default profile, live models forbidden.
+  A `DATABASE_URL` or S3 endpoint in the environment contradicts
+  the composition and refuses, rather than silently re-pointing
+  a local boot at production stores.
+- **`hosted`** — PostgreSQL via `DATABASE_URL` (required; there
+  is no default connection string), object storage chosen
+  explicitly (`OBJECT_DIR` or `S3_ENDPOINT_URL`), and the harness
+  default is whatever the profile regression gate has promoted.
+  Live models are permitted only through a promoted harness
+  profile: a hosted boot that pairs a live model with no
+  promotion on record refuses at startup. The compose topology
+  above boots as `hosted` — so a provider key alone no longer
+  takes a fresh deployment live; the profile must first earn
+  promotion through the eval gate, or the deployment runs the
+  stub until one does.
+- **`hosted-self`** — hosted, for a self-hosted model endpoint
+  (NVIDIA NIM and its kin): the model is reached through the
+  OpenAI-compatible boundary, and `OPENAI_BASE_URL` is required
+  with no default on purpose — a silent default would send
+  diligence traffic to a public API the deployment never chose.
+
+Every case, and every run within it, records the deployment it
+ran under — profile name, harness profile id, store backend —
+on the case record, in the trace, and on the case read; work
+recorded before deployment profiles existed reads as
+deployment-unknown, never backfilled with the current boot's
+values. Naming a profile is the act that binds its rules:
+settings built without naming one (the test suite's and eval
+packs' compositions) keep the behaviour they always had.
 
 ## Honest limits
 

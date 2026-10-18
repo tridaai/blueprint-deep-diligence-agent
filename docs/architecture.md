@@ -40,6 +40,7 @@ it, so they hold for any model the harness runs.
 | Conflicts | `conflicts.py` | Deterministic keying of supported claims by (entity, metric, period); conflict records with both sides, source classes, and recency labels |
 | Workbench | `workbench.py` | The analyst queue derived from case records (grouped by act needed, oldest first), the merged case timeline, and deterministic case search; saved views in the store |
 | Observability | `observability.py` | The run trace folded from the stored records (runs from the budget/cost ledgers, every audit entry as one act), the failure taxonomy (one function, total by construction), and the operations digest fold — stored versioned by the service, never a counter |
+| Deployment | `deployment.py` | The named runtime compositions (local / hosted / hosted-self): validated as a whole at settings load, the live-model permission checked at startup against the promotion log, and the deployment record stamped on cases and runs |
 | Store | `store.py` | Case store port: SQLite (local) / PostgreSQL (production) |
 | Objects | `objects.py` | Object-store port: local dir / S3-compatible |
 | Corpus | `corpus.py` | Generated evidence corpus + gold case packs |
@@ -1210,6 +1211,77 @@ every behavioural field) returns PROMOTABLE and completes a
 promotion + rollback cycle. A third control tampers with a
 candidate file after evaluation and shows promotion refused on
 the hash check.
+
+## Deployment profiles
+
+Round 19 names the runtime composition. Settings have always
+named the parts — a store, an object store, a model backend, a
+harness profile — but a deployment is the composition, and some
+compositions are wrong in ways no single setting can see: a
+local boot silently picking up a production database URL, a
+hosted boot with no database at all, a live model paired with a
+harness profile that never earned production. `deployment.py`
+makes the composition one named, validated choice, selected with
+`DEPLOYMENT_PROFILE` from a closed set in code:
+
+- **`local`** — the developer and evaluation composition:
+  SQLite at SQLITE_PATH, the local object directory, the offline
+  stub harness as the default profile, live models forbidden.
+  A set DATABASE_URL or S3 endpoint contradicts the composition
+  and refuses, rather than re-pointing the local boot at
+  production stores.
+- **`hosted`** — the production composition: PostgreSQL via
+  DATABASE_URL (required — no default connection string exists
+  to fall back to), object storage chosen explicitly (OBJECT_DIR
+  or S3_ENDPOINT_URL — never the silent local default), and the
+  harness default is the R7 gate's resolution: the promoted
+  profile where a promotion is recorded, the bootstrap otherwise.
+- **`hosted-self`** — hosted, for a self-hosted model endpoint:
+  the OpenAI-compatible boundary (LLM_BACKEND=openai) with
+  OPENAI_BASE_URL required and deliberately defaultless — the
+  house pattern for self-hosted endpoints (NVIDIA NIM and its
+  kin): base URL + key in the environment, the model named by
+  the harness profile that targets it.
+
+**Validation is fail-closed, in two places.** Everything
+settings can judge is checked at settings load
+(`validate_deployment`, called from `load_settings` whenever a
+profile is explicitly selected): unknown names refuse with the
+valid set listed; each requirement's refusal is a `ConfigError`
+naming the profile and the failed requirement. The one rule
+settings cannot judge — under a hosted profile, live models are
+permitted only through a promoted harness profile — needs the
+promotion log, so `check_live_permission` runs at service
+startup, once the active profile has been resolved from that
+log. A bootstrap profile grants no live permission, and the
+check never widens the gate: it only refuses. In practice this
+changes one historical composition: the stub harness profile
+paired by convention with a live model (the compose topology's
+provider-key flow) is, under `hosted`, a refusal until the
+target profile is promoted — the gate's whole purpose, applied
+at the deployment door. Naming a profile is the act that binds
+its rules; settings built without naming one (test and eval
+compositions, built from overrides) keep their historical
+behaviour, because the profiles govern deployments and a
+deployment names its profile.
+
+**The deployment is recorded.** A case is stamped at intake and
+every run at its `budget_granted` entry with the deployment it
+ran under — `{profile, harness_profile, store}`: the profile's
+name, the harness profile id as it stood when the work ran (a
+promotion moves later work's stamps, as the profile stamp
+already behaved), and the store backend class. Identities and
+shapes only — never a secret, never a URL (a DATABASE_URL can
+carry credentials). The trace header and each folded run present
+the stamp (`deployment_view`), the case read carries it
+(`CaseOut.deployment`), and readiness names the active
+deployment profile beside the store, objects, model, and harness
+profile; the console header shows the same line. Records from
+before this round carry no stamp and read as
+deployment-unknown — `{profile: "unknown", harness_profile:
+null, store: "unknown"}` — never backfilled with the composition
+the current process happened to boot under, the same precedent
+as the page-agent copilot's pre-profile attempts.
 
 ## Red-team pack
 

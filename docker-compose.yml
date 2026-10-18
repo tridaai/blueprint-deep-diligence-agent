@@ -9,7 +9,10 @@
 #   open http://localhost:8000 for the console
 #
 # A real model is the lead profile: copy .env.example to .env and set a
-# provider. With no key the agent uses the labelled offline stub.
+# provider — and, because this topology boots as the hosted deployment
+# profile, promote the harness profile that targets it through the eval
+# gate first; hosted runs live models only behind a recorded promotion.
+# With no key the agent uses the labelled offline stub.
 
 services:
   api:
@@ -17,6 +20,14 @@ services:
     ports:
       - "8000:8000"
     environment:
+      # This topology is the hosted deployment profile: PostgreSQL
+      # + S3 object storage, both named explicitly. Under hosted, a
+      # live model (LLM_BACKEND below) runs only through a harness
+      # profile the eval gate has promoted — a provider key alone
+      # no longer takes a fresh deployment live; until a promotion
+      # is recorded the API refuses that composition at startup and
+      # runs the offline stub when no live backend is set.
+      DEPLOYMENT_PROFILE: hosted
       DATABASE_URL: postgresql://diligence:diligence@postgres:5432/diligence
       S3_BUCKET: diligence-evidence
       S3_ENDPOINT_URL: http://minio:8333
