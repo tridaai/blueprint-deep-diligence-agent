@@ -70,6 +70,23 @@ out of the report — and the clean case must record no challenges
 at all and approve unimpeded. Challenges must never appear in a
 delivered report format.
 
+The skills pack grades the skills library (skills.py): a case
+whose brief names revenue-bridge for its financial workstream
+and contradiction-hunting for its product workstream must carry
+the names on the plan, pin version 1 of each at approval, mount
+the pinned method text read-only at /skills/<name>.md, stamp
+every finding of those workstreams with the pins, name the skills
+in the report's Method section, and hold full gold recall. A
+skill named for a role it does not apply to, and a name that is
+not in the library, must refuse at the plan gate; publishing a
+tool-widening version, or a version that skips the line, must
+refuse at publish; and a version published mid-case must not
+move a case whose plan already pinned the older one. The pack
+grades loading, gating, and provenance — the scripted model
+reads the mounted files as its playbook step, but it cannot
+follow prose method, so no outcome difference is claimed for
+the method text itself.
+
 Exit code 0 only when every gate passes for every case.
 
 Profiles: `--profile <id>` runs the same packs under a different
@@ -122,6 +139,7 @@ from deep_diligence.evaluation import (  # noqa: E402
 from deep_diligence.models import BriefIn, BudgetIn  # noqa: E402
 from deep_diligence.profiles import ProfileError, load_profile  # noqa: E402
 from deep_diligence.service import CaseService, GateError  # noqa: E402
+from deep_diligence.skills import SkillError  # noqa: E402
 
 DEFAULT_PROFILE = "offline-stub"
 
@@ -796,6 +814,270 @@ def run_challenge_cases(profile_id: str = DEFAULT_PROFILE) -> dict:
     }
 
 
+def run_skills_cases(profile_id: str = DEFAULT_PROFILE) -> dict:
+    """The skills pack: the governed method library graded end to
+    end. The Helvion brief names revenue-bridge for its financial
+    workstream and contradiction-hunting for its product
+    workstream: the names must ride the plan artifact, approval
+    must pin version 1 of each (and record the pins in the audit),
+    the pinned method text must mount read-only at
+    /skills/<name>.md on the case filesystem, every finding of
+    those workstreams must carry the pins as provenance, the
+    report's Method section must name what ran, and recall must
+    hold at the full gold set. A skill named for a role it does
+    not apply to, and a name missing from the library, must refuse
+    at the plan gate with the plan left standing; publishing a
+    tool-widening version or a version that skips the line must
+    refuse at publish; a version published mid-case must not move
+    the case that pinned the older one, while the next approved
+    plan pins the new version. The pack grades loading, gating,
+    and provenance: the scripted model reads the mounted files as
+    a playbook step but cannot follow prose method, so no outcome
+    difference is claimed for the method text itself. The pack
+    grades the shell, so it stands outside the promotion split,
+    like the budget and red-team packs."""
+    checks: list[dict] = []
+
+    def check(name: str, ok: bool, detail: str = "") -> None:
+        checks.append({"name": name, "ok": bool(ok), "detail": detail})
+
+    def fresh_service(prefix: str) -> CaseService:
+        scratch = Path(tempfile.mkdtemp(prefix=prefix))
+        settings = load_settings(
+            sqlite_path=str(scratch / "diligence.db"),
+            object_dir=str(scratch / "objects"),
+            migrations_dir=str(REPO_ROOT / "migrations"),
+            profile_id=profile_id,
+        )
+        return CaseService(settings)
+
+    def skills_brief(**question_skills) -> dict:
+        gold = GOLD_CASES[0]
+        brief = {
+            **gold["brief"],
+            "questions": [dict(q) for q in gold["brief"]["questions"]],
+        }
+        for question in brief["questions"]:
+            if question["id"] in question_skills:
+                question["skills"] = question_skills[question["id"]]
+        return brief
+
+    gold = GOLD_CASES[0]
+
+    # -- the governed run ---------------------------------------------------
+    service = fresh_service("deep-diligence-eval-skills-")
+    library = {(s["name"], s["version"]) for s in service.list_skills()}
+    check(
+        "library-seeded",
+        library
+        == {
+            ("revenue-bridge", 1),
+            ("contradiction-hunting", 1),
+            ("source-triangulation", 1),
+        },
+        f"library: {sorted(library)}",
+    )
+    case = service.create_case(
+        BriefIn(
+            **skills_brief(
+                q1=["revenue-bridge"], q2=["contradiction-hunting"]
+            )
+        )
+    )
+    case_id = case["case_id"]
+    plan = service.run_planning(case_id)
+    entries = {w["question_id"]: w for w in plan["plan"]["workstreams"]}
+    check(
+        "plan-carries-the-names",
+        entries["q1"].get("skills") == ["revenue-bridge"]
+        and entries["q2"].get("skills") == ["contradiction-hunting"]
+        and "skills" not in entries["q3"]
+        and "skills: revenue-bridge" in plan["markdown"],
+        "the plan artifact and its readable form name the methods "
+        "the approver is being asked to approve",
+    )
+    service.decide_plan(case_id, analyst="Eval Harness", approve=True)
+    plan = service.store.get_plan(case_id)
+    entries = {w["question_id"]: w for w in plan["plan"]["workstreams"]}
+    pins = {
+        "q1": [{"name": "revenue-bridge", "version": 1}],
+        "q2": [{"name": "contradiction-hunting", "version": 1}],
+    }
+    approved = next(
+        a
+        for a in service.store.list_audit(case_id)
+        if a["event"] == "plan_approved"
+    )
+    check(
+        "approval-pins-version-1",
+        entries["q1"].get("skills") == pins["q1"]
+        and entries["q2"].get("skills") == pins["q2"]
+        and approved["payload"].get("skills") == pins,
+        f"pins on the plan: q1 {entries['q1'].get('skills')}, "
+        f"q2 {entries['q2'].get('skills')}",
+    )
+    backend = service._backend(case_id)
+    seeded = service.store.get_skill("revenue-bridge", 1)
+    mounted = backend.read("/skills/revenue-bridge.md")
+    write_attempt = backend.write("/skills/revenue-bridge.md", "tampered")
+    edit_attempt = backend.edit("/skills/revenue-bridge.md", "METHOD", "X")
+    check(
+        "mount-is-the-pinned-text-and-read-only",
+        mounted.error is None
+        and mounted.file_data["content"] == seeded["method"]
+        and write_attempt.error == "Skill files are read-only"
+        and edit_attempt.error == "Skill files are read-only",
+        "the mounted file is the library's v1 method text verbatim; "
+        "write and edit both refuse",
+    )
+    service.run_execution(case_id)
+    findings = service.store.list_findings(case_id)
+    provenance_ok = all(
+        f.get("skills") == pins[f["question_id"]]
+        for f in findings
+        if f["question_id"] in pins
+    ) and all(
+        "skills" not in f for f in findings if f["question_id"] == "q3"
+    )
+    found = {f["fact_ref"] for f in findings if f.get("fact_ref")}
+    check(
+        "findings-carry-provenance-and-recall-holds",
+        provenance_ok and found == set(gold["gold_facts"]),
+        f"{len(findings)} findings; q1/q2 findings stamped with "
+        f"their pins, q3 unstamped; recall {len(found & set(gold['gold_facts']))}"
+        f"/{len(gold['gold_facts'])}",
+    )
+    started = next(
+        a
+        for a in service.store.list_audit(case_id)
+        if a["event"] == "execution_started"
+    )
+    report = service.store.get_report(case_id)
+    notes = report["model"]["method_notes"]
+    check(
+        "method-section-names-what-ran",
+        started["payload"].get("skills") == pins
+        and any("revenue-bridge v1" in n for n in notes)
+        and any("contradiction-hunting v1" in n for n in notes)
+        and "revenue-bridge v1" in report["markdown"],
+        "the execution record and the report's Method section "
+        "both name the pinned skills",
+    )
+
+    # -- the gate refusals --------------------------------------------------
+    service2 = fresh_service("deep-diligence-eval-skills-mismatch-")
+    mismatch = service2.create_case(
+        BriefIn(**skills_brief(q3=["revenue-bridge"]))
+    )
+    service2.run_planning(mismatch["case_id"])
+    refusal = ""
+    try:
+        service2.decide_plan(
+            mismatch["case_id"], analyst="Eval Harness", approve=True
+        )
+    except GateError as exc:
+        refusal = str(exc)
+    check(
+        "role-mismatch-refused-at-the-gate",
+        "revenue-bridge" in refusal
+        and "market-scan" in refusal
+        and service2.store.get_case(mismatch["case_id"])["status"]
+        == "PLAN_READY",
+        f"refusal: {refusal}",
+    )
+    unknown = service2.create_case(
+        BriefIn(**skills_brief(q1=["no-such-skill"]))
+    )
+    service2.run_planning(unknown["case_id"])
+    refusal = ""
+    try:
+        service2.decide_plan(
+            unknown["case_id"], analyst="Eval Harness", approve=True
+        )
+    except GateError as exc:
+        refusal = str(exc)
+    check(
+        "unknown-skill-refused-at-the-gate",
+        "no-such-skill" in refusal and "not in the skills library" in refusal,
+        f"refusal: {refusal}",
+    )
+
+    # -- publish discipline + the pin holds ---------------------------------
+    published = service.publish_skill(
+        "Eval Harness",
+        {
+            "name": "revenue-bridge",
+            "version": 2,
+            "applies_to": ["financial-scan"],
+            "tools": ["search_corpus", "read_document", "record_finding"],
+            "description": "The revised revenue method.",
+            "method": "METHOD: REVENUE BRIDGE v2 — revised text.",
+            "changelog": "Revised after the graded case pinned v1.",
+        },
+    )
+    widening_refused = False
+    try:
+        service.publish_skill(
+            "Eval Harness",
+            {
+                "name": "revenue-bridge",
+                "version": 3,
+                "applies_to": ["financial-scan"],
+                "tools": ["search_corpus", "execute_plan"],
+                "description": "A widening method.",
+                "method": "METHOD: reach for tools the role does not hold.",
+                "changelog": "Must never land.",
+            },
+        )
+    except SkillError:
+        widening_refused = True
+    skip_refused = False
+    try:
+        service.publish_skill(
+            "Eval Harness",
+            {
+                "name": "revenue-bridge",
+                "version": 5,
+                "applies_to": ["financial-scan"],
+                "tools": ["search_corpus", "read_document", "record_finding"],
+                "description": "A version that skips the line.",
+                "method": "METHOD: REVENUE BRIDGE v5.",
+                "changelog": "Must never land.",
+            },
+        )
+    except SkillError:
+        skip_refused = True
+    mounted_after = service._backend(case_id).read("/skills/revenue-bridge.md")
+    check(
+        "publish-is-gated-and-the-pin-holds",
+        published["origin"] == "published"
+        and widening_refused
+        and skip_refused
+        and service.store.latest_skill("revenue-bridge")["version"] == 2
+        and mounted_after.file_data["content"] == seeded["method"],
+        "v2 published as a recorded act; the widening v3 and the "
+        "line-skipping v5 both refused; the graded case still "
+        "mounts v1's text",
+    )
+    later = service.create_case(
+        BriefIn(**skills_brief(q1=["revenue-bridge"]))
+    )
+    service.run_planning(later["case_id"])
+    service.decide_plan(later["case_id"], analyst="Eval Harness", approve=True)
+    later_plan = service.store.get_plan(later["case_id"])
+    check(
+        "the-next-approval-pins-the-new-version",
+        later_plan["plan"]["workstreams"][0]["skills"]
+        == [{"name": "revenue-bridge", "version": 2}],
+        "a plan approved after the publish pins v2",
+    )
+    return {
+        "key": "skills-library",
+        "checks": checks,
+        "ok": all(c["ok"] for c in checks),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Gold case-pack gate for the Deep Diligence Agent."
@@ -1078,6 +1360,27 @@ def main(argv: list[str] | None = None) -> int:
             f"  challenge check {challenge_check['name']}: "
             f"{'OK' if challenge_check['ok'] else 'FAILED'}"
             f" — {challenge_check['detail']}"
+        )
+    # Skills pack: the governed method library graded on loading,
+    # gating, and provenance — a brief-named skill rides the plan,
+    # approval pins its version, the pinned text mounts read-only,
+    # findings carry the pins, and the publish act is itself
+    # gated. Outside the promotion split, like the budget and
+    # red-team packs.
+    skills_result = run_skills_cases(profile_id=args.profile)
+    all_pass = all_pass and skills_result["ok"]
+    print(
+        f"{skills_result['key']}: brief-named skills ride the "
+        f"plan, approval pins their versions, the pinned text "
+        f"mounts read-only, findings carry the provenance, the "
+        f"gate and the publish act both refuse what they must "
+        f"-> {'PASS' if skills_result['ok'] else 'FAIL'}"
+    )
+    for skills_check in skills_result["checks"]:
+        print(
+            f"  skills check {skills_check['name']}: "
+            f"{'OK' if skills_check['ok'] else 'FAILED'}"
+            f" — {skills_check['detail']}"
         )
     print(
         f"unsupported claims in final reports across all packs: "
