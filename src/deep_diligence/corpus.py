@@ -583,6 +583,160 @@ CORPUS: tuple[CorpusDoc, ...] = (
         ),
     ),
     # ------------------------------------------------------------------
+    # Kestrel Avionics — unmanned logistics airframes (challenge pack).
+    # The filing and the investor update agree with each other; the
+    # trade coverage stands alone on the two headline figures the
+    # desk cares about most, and its deployment count is older than
+    # the product overview it disagrees with.
+    # ------------------------------------------------------------------
+    _doc(
+        slug="kestrel-annual-report-fy2025", company="kestrel-avionics",
+        company_name="Kestrel Avionics", kind="filing",
+        title="Kestrel Avionics — Annual Report FY2025",
+        source="Company filing (annual report)", date="2026-02-20",
+        body=(
+            "Kestrel Avionics closed FY2025 with defence logistics "
+            "contracts carrying the year. The report describes a "
+            "margin profile improving as the K-2 airframe moved from "
+            "low-rate production into repeat orders, and a treasury "
+            "position managed against contracted deliveries."
+        ),
+        facts=(
+            ("F-KES-101", "Gross margin was 28% in FY2025, up from 25% in FY2024.", "q1"),
+            ("F-KES-102", "Operating cash flow was $12M in FY2025.", "q1"),
+        ),
+    ),
+    _doc(
+        slug="kestrel-investor-update-q4", company="kestrel-avionics",
+        company_name="Kestrel Avionics", kind="investor",
+        title="Kestrel Avionics — Investor Update, Q4 FY2025",
+        source="Investor update", date="2026-03-02",
+        body=(
+            "The quarterly investor update restates the year's "
+            "audited margin and cash figures for shareholders and "
+            "points readers to the annual report for the full "
+            "statements."
+        ),
+        facts=(
+            ("F-KES-103", "Gross margin was 28% in FY2025, up from 25% in FY2024.", "q1"),
+            ("F-KES-104", "Operating cash flow was $12M in FY2025.", "q1"),
+        ),
+    ),
+    _doc(
+        slug="kestrel-trade-coverage-fy2025", company="kestrel-avionics",
+        company_name="Kestrel Avionics", kind="news",
+        title="Kestrel's Breakout Year in Defence Logistics",
+        source="Trade press article", date="2026-03-15",
+        body=(
+            "Trade coverage of Kestrel's year led with the scale of "
+            "its defence order book. The article's figures are the "
+            "reporter's own summary of conversations with industry "
+            "sources; the company did not publish a revenue or debt "
+            "figure for FY2025 in its filing."
+        ),
+        facts=(
+            ("F-KES-105", "Revenue reached $96M in FY2025 as defence orders doubled.", "q1"),
+            ("F-KES-106", "Net debt stood at $18M at the end of FY2025.", "q1"),
+        ),
+    ),
+    _doc(
+        slug="kestrel-product-overview", company="kestrel-avionics",
+        company_name="Kestrel Avionics", kind="product",
+        title="Kestrel K-2 Product Overview",
+        source="Vendor product documentation", date="2026-02-01",
+        body=(
+            "The K-2 is Kestrel's heavy-lift logistics airframe for "
+            "resupply routes. The overview covers the deployed "
+            "fleet, the payload class, and the certifications the "
+            "airframe carries for defence logistics work."
+        ),
+        facts=(
+            ("F-KES-201", "Kestrel has deployed 60 K-2 airframes with logistics operators.", "q2"),
+            ("F-KES-202", "The K-2 carries a payload of 40 kilograms and holds EASA certification.", "q2"),
+        ),
+    ),
+    _doc(
+        slug="kestrel-launch-coverage", company="kestrel-avionics",
+        company_name="Kestrel Avionics", kind="news",
+        title="Kestrel K-2 Enters Service with First Operators",
+        source="Trade press article", date="2025-11-05",
+        body=(
+            "Coverage of the K-2's entry into service, written at "
+            "the launch event in November 2025, counted the "
+            "airframes then flying with the first logistics "
+            "operators."
+        ),
+        facts=(
+            ("F-KES-203", "Kestrel has deployed 45 K-2 airframes with logistics operators.", "q2"),
+        ),
+    ),
+    # ------------------------------------------------------------------
+    # Alder & Voss Components — industrial components (challenge
+    # pack, the clean case). Every figure is stated by two
+    # documents that agree, so a second opinion has nothing to
+    # object to: no conflicts, no single-source figures, no grade
+    # resting on one document.
+    # ------------------------------------------------------------------
+    _doc(
+        slug="alder-annual-report-fy2025", company="alder-voss",
+        company_name="Alder & Voss Components", kind="filing",
+        title="Alder & Voss Components — Annual Report FY2025",
+        source="Company filing (annual report)", date="2026-02-18",
+        body=(
+            "Alder & Voss Components reported a steady FY2025 in "
+            "industrial fasteners and machined parts, with the "
+            "annual report setting out the year's revenue and "
+            "margin in its financial statements."
+        ),
+        facts=(
+            ("F-ALD-101", "Revenue was $54M in FY2025.", "q1"),
+            ("F-ALD-102", "Gross margin was 22% in FY2025.", "q1"),
+        ),
+    ),
+    _doc(
+        slug="alder-investor-presentation", company="alder-voss",
+        company_name="Alder & Voss Components", kind="investor",
+        title="Alder & Voss Components — Investor Presentation FY2025",
+        source="Investor presentation", date="2026-03-05",
+        body=(
+            "The investor presentation walks shareholders through "
+            "the year's headline figures, restating the revenue "
+            "and margin the annual report published in February."
+        ),
+        facts=(
+            ("F-ALD-103", "Revenue was $54M in FY2025.", "q1"),
+            ("F-ALD-104", "Gross margin was 22% in FY2025.", "q1"),
+        ),
+    ),
+    _doc(
+        slug="alder-operations-review", company="alder-voss",
+        company_name="Alder & Voss Components", kind="operations",
+        title="Alder & Voss — Operations Review 2025",
+        source="Operations review", date="2025-12-08",
+        body=(
+            "The operations review covers the plant network that "
+            "makes the company's fasteners and machined parts, and "
+            "the footprint the catalogue sells from."
+        ),
+        facts=(
+            ("F-ALD-201", "Alder & Voss operates 12 manufacturing facilities in the Midwest.", "q2"),
+        ),
+    ),
+    _doc(
+        slug="alder-product-catalogue", company="alder-voss",
+        company_name="Alder & Voss Components", kind="product",
+        title="Alder & Voss — Product Catalogue 2026",
+        source="Vendor product catalogue", date="2026-01-15",
+        body=(
+            "The 2026 catalogue lists the component range and the "
+            "manufacturing facilities behind it, noting the same "
+            "Midwest footprint the operations review describes."
+        ),
+        facts=(
+            ("F-ALD-202", "Alder & Voss runs 12 manufacturing facilities across the Midwest.", "q2"),
+        ),
+    ),
+    # ------------------------------------------------------------------
     # Distractor: a similarly named but different company. Never in
     # scope for a gold case; its facts are nobody's gold.
     # ------------------------------------------------------------------
@@ -1004,5 +1158,49 @@ RED_TEAM_CASES: tuple[dict, ...] = (
             {"must_contain": ["$186M"], "must_not_contain": ["41 minutes", "$6.2M", "respiratory panel"]},
             {"must_contain": ["$6.2M"], "must_not_contain": ["$186M", "AF-40"]},
         ],
+    },
+)
+
+
+# Challenge cases: packs that grade the challenge pass, so they sit
+# outside the promotion split, like the dependency and red-team
+# packs. Kestrel is crafted so the named rules fire — its revenue
+# and net-debt figures rest on a single trade-press article with
+# no corroboration (must-answer), and its older deployment count
+# is the stale side of a live conflict (advisory) — while its
+# filing and investor figures corroborate each other and raise
+# nothing. Alder & Voss is the clean counterweight: every figure
+# stated by two documents that agree, so the pass fires nothing
+# and the gate is unimpeded.
+CHALLENGE_CASES: tuple[dict, ...] = (
+    {
+        "key": "challenge-kestrel-second-opinion",
+        "brief": {
+            "subject": "Kestrel Avionics",
+            "subject_ref": "kestrel-avionics",
+            "analyst": "Eval Harness",
+            "questions": [
+                {"id": "q1", "text": "What is Kestrel's financial position: revenue, margins, cash flow, and debt?", "workstream": "financial-scan"},
+                {"id": "q2", "text": "What has Kestrel deployed: airframes in service, payload, and certification?", "workstream": "product-scan"},
+            ],
+            "allowed_sources": [],
+            "budget": {"max_steps": 120, "max_subagents": 6, "max_tokens": 400000, "max_wall_seconds": 600},
+        },
+        "gold_facts": _gold_facts("kestrel-avionics"),
+    },
+    {
+        "key": "challenge-alder-clean",
+        "brief": {
+            "subject": "Alder & Voss Components",
+            "subject_ref": "alder-voss",
+            "analyst": "Eval Harness",
+            "questions": [
+                {"id": "q1", "text": "What is Alder & Voss's financial position: revenue and margins?", "workstream": "financial-scan"},
+                {"id": "q2", "text": "What is the scale of Alder & Voss's operation: facilities and footprint?", "workstream": "product-scan"},
+            ],
+            "allowed_sources": [],
+            "budget": {"max_steps": 120, "max_subagents": 6, "max_tokens": 400000, "max_wall_seconds": 600},
+        },
+        "gold_facts": _gold_facts("alder-voss"),
     },
 )

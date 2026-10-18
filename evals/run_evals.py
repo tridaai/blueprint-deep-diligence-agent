@@ -59,6 +59,17 @@ question whose only sources are out of scope, and cross-case
 citation. Every attack must be held and the pack's zero-tolerance
 counters must read zero.
 
+The challenge pack (CHALLENGE_CASES) grades the challenge pass:
+the crafted case must record exactly the challenges its records
+support (two must-answer single-source headline figures, one
+advisory stale side of a conflict), approval must be refused
+while a must-answer challenge is open, the rebuttal path must
+unblock it, the revise path must return the claim to
+re-investigation, the downgrade path must quarantine the claim
+out of the report — and the clean case must record no challenges
+at all and approve unimpeded. Challenges must never appear in a
+delivered report format.
+
 Exit code 0 only when every gate passes for every case.
 
 Profiles: `--profile <id>` runs the same packs under a different
@@ -83,6 +94,7 @@ on them: match the incumbent on tuning, do not regress on held-out.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -93,6 +105,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 from deep_diligence.budgets import budget_view  # noqa: E402
 from deep_diligence.config import load_settings  # noqa: E402
 from deep_diligence.corpus import (  # noqa: E402
+    CHALLENGE_CASES,
     DEPENDENCY_CASES,
     GOLD_CASES,
     INTEGRITY_CASES,
@@ -108,7 +121,7 @@ from deep_diligence.evaluation import (  # noqa: E402
 )
 from deep_diligence.models import BriefIn, BudgetIn  # noqa: E402
 from deep_diligence.profiles import ProfileError, load_profile  # noqa: E402
-from deep_diligence.service import CaseService  # noqa: E402
+from deep_diligence.service import CaseService, GateError  # noqa: E402
 
 DEFAULT_PROFILE = "offline-stub"
 
@@ -529,6 +542,260 @@ def run_portfolio_cases(profile_id: str = DEFAULT_PROFILE) -> dict:
     }
 
 
+def run_challenge_cases(profile_id: str = DEFAULT_PROFILE) -> dict:
+    """The challenge pack: the challenge pass graded end to end.
+
+    Kestrel is crafted so named rules fire: its revenue ($96M) and
+    net debt ($18M) figures rest on a single trade-press article
+    with no corroboration — must-answer challenges — and its older
+    deployment count (45, against the product overview's 60) is
+    the stale side of a live conflict — an advisory. The filing
+    and investor figures corroborate each other and raise nothing.
+    Gold: exactly those three challenges are recorded; approval is
+    refused, naming the open must-answer challenges, while either
+    stands; rebutting both (with counter-evidence named from the
+    case) unblocks approval with the advisory still open; on fresh
+    runs, revising a challenged claim returns the case to APPROVED
+    with its finding gone, and downgrading one quarantines it out
+    of the report. Alder & Voss — every figure stated by two
+    documents that agree — records no challenges at all and
+    approves unimpeded. No delivered format of any report carries
+    a challenge. The pack grades the second opinion, so it stands
+    outside the promotion split, like the budget and red-team
+    packs."""
+    checks: list[dict] = []
+
+    def check(name: str, ok: bool, detail: str = "") -> None:
+        checks.append({"name": name, "ok": bool(ok), "detail": detail})
+
+    def fresh_service(prefix: str) -> CaseService:
+        scratch = Path(tempfile.mkdtemp(prefix=prefix))
+        settings = load_settings(
+            sqlite_path=str(scratch / "diligence.db"),
+            object_dir=str(scratch / "objects"),
+            migrations_dir=str(REPO_ROOT / "migrations"),
+            profile_id=profile_id,
+        )
+        return CaseService(settings)
+
+    def full_run(service: CaseService, gold: dict) -> str:
+        case = service.create_case(BriefIn(**gold["brief"]))
+        case_id = case["case_id"]
+        service.run_planning(case_id)
+        service.decide_plan(case_id, analyst="Eval Harness", approve=True)
+        service.run_execution(case_id)
+        return case_id
+
+    kestrel, alder = CHALLENGE_CASES
+
+    # -- the rebuttal path ------------------------------------------------
+    service = fresh_service("deep-diligence-eval-challenge-")
+    case_id = full_run(service, kestrel)
+    raised = service.store.list_challenges(case_id)
+    by_rule = sorted(
+        (c["rule"], c["severity"], c["claim_id"]) for c in raised
+    )
+    check(
+        "challenges-recorded-exactly",
+        by_rule
+        == [
+            ("oldest_source_on_contested_metric", "advisory", "CLM-0009"),
+            ("single_source_figure", "must_answer", "CLM-0005"),
+            ("single_source_figure", "must_answer", "CLM-0006"),
+        ],
+        f"recorded: {by_rule}",
+    )
+    must = [c for c in raised if c["severity"] == "must_answer"]
+    filing_id = next(
+        ev["evidence_id"]
+        for ev in service.store.list_evidence(case_id)
+        if ev["kind"] == "filing"
+    )
+    refusal = ""
+    try:
+        service.decide_report(case_id, analyst="Eval Harness", approve=True)
+    except GateError as exc:
+        refusal = str(exc)
+    check(
+        "approval-refused-while-must-answer-open",
+        all(c["challenge_id"] in refusal for c in must)
+        and service.store.get_case(case_id)["status"] == "DRAFT_READY",
+        f"refusal: {refusal}",
+    )
+    service.decide_challenge(
+        case_id,
+        must[0]["challenge_id"],
+        analyst="Eval Harness",
+        action="rebut",
+        note="The trade figure is the reporter's own summary; the "
+        "filing's silence on revenue is noted and the figure stands "
+        "as reported, attributed to its source.",
+        counter_evidence_ids=[filing_id],
+    )
+    refusal = ""
+    try:
+        service.decide_report(case_id, analyst="Eval Harness", approve=True)
+    except GateError as exc:
+        refusal = str(exc)
+    check(
+        "one-open-must-answer-still-refuses",
+        must[1]["challenge_id"] in refusal
+        and must[0]["challenge_id"] not in refusal,
+        f"refusal: {refusal}",
+    )
+    service.decide_challenge(
+        case_id,
+        must[1]["challenge_id"],
+        analyst="Eval Harness",
+        action="rebut",
+        note="Net debt is carried as the trade article reports it; "
+        "the desk accepts the single source with the attribution "
+        "standing in the report.",
+        counter_evidence_ids=[filing_id],
+    )
+    decided = service.decide_report(
+        case_id, analyst="Eval Harness", approve=True
+    )
+    answered = {
+        c["challenge_id"]: c for c in service.store.list_challenges(case_id)
+    }
+    advisory_open = any(
+        c["status"] == "OPEN" and c["severity"] == "advisory"
+        for c in answered.values()
+    )
+    check(
+        "rebuttal-unblocks-and-advisory-never-blocks",
+        decided["status"] == "FINAL"
+        and all(
+            answered[c["challenge_id"]]["status"] == "ANSWERED"
+            and answered[c["challenge_id"]]["disposition"] == "rebutted"
+            and answered[c["challenge_id"]]["answers"][0][
+                "counter_evidence_ids"
+            ]
+            == [filing_id]
+            for c in must
+        )
+        and advisory_open,
+        "both rebuttals recorded with their counter-evidence; the "
+        "advisory challenge stayed open and did not block",
+    )
+    report = service.store.get_report(case_id)
+    export = json.dumps(service.report_export(case_id))
+    delivered = report["markdown"] + report["html"] + export
+    check(
+        "challenges-stay-out-of-the-delivered-report",
+        "CHL-" not in delivered
+        and "single_source_figure" not in delivered
+        and "oldest_source_on_contested_metric" not in delivered,
+        "no challenge id or rule name in markdown, HTML, or export",
+    )
+
+    # -- the revise path ----------------------------------------------------
+    service = fresh_service("deep-diligence-eval-challenge-revise-")
+    case_id = full_run(service, kestrel)
+    target = next(
+        c
+        for c in service.store.list_challenges(case_id)
+        if c["severity"] == "must_answer"
+        and c["detail"]["assertions"][0]["metric"] == "revenue"
+    )
+    findings_before = len(service.store.list_findings(case_id))
+    service.decide_challenge(
+        case_id,
+        target["challenge_id"],
+        analyst="Eval Harness",
+        action="revise",
+        note="A headline revenue figure cannot rest on one trade "
+        "article; re-derive it from a primary source.",
+    )
+    case = service.store.get_case(case_id)
+    findings = service.store.list_findings(case_id)
+    record = service.store.get_challenge(case_id, target["challenge_id"])
+    check(
+        "revise-returns-the-claim-to-reinvestigation",
+        case["status"] == "APPROVED"
+        and len(findings) == findings_before - 1
+        and all(f["fact_ref"] != "F-KES-105" for f in findings)
+        and record["status"] == "ANSWERED"
+        and record["disposition"] == "revised",
+        f"case {case['status']}, findings {len(findings)} of "
+        f"{findings_before}, revenue finding gone",
+    )
+
+    # -- the downgrade path -------------------------------------------------
+    service = fresh_service("deep-diligence-eval-challenge-downgrade-")
+    case_id = full_run(service, kestrel)
+    debt = next(
+        c
+        for c in service.store.list_challenges(case_id)
+        if c["severity"] == "must_answer"
+        and c["detail"]["assertions"][0]["metric"] == "net debt"
+    )
+    service.decide_challenge(
+        case_id,
+        debt["challenge_id"],
+        analyst="Eval Harness",
+        action="downgrade",
+        note="The desk will not carry a net-debt figure sourced "
+        "only to trade coverage.",
+    )
+    report = service.store.get_report(case_id)
+    quarantine = service.store.list_quarantine(case_id)
+    revenue = next(
+        c
+        for c in service.store.list_challenges(case_id)
+        if c["severity"] == "must_answer" and c["status"] == "OPEN"
+    )
+    filing_id = next(
+        ev["evidence_id"]
+        for ev in service.store.list_evidence(case_id)
+        if ev["kind"] == "filing"
+    )
+    service.decide_challenge(
+        case_id,
+        revenue["challenge_id"],
+        analyst="Eval Harness",
+        action="rebut",
+        note="Stands as reported, attributed to its source.",
+        counter_evidence_ids=[filing_id],
+    )
+    decided = service.decide_report(
+        case_id, analyst="Eval Harness", approve=True
+    )
+    check(
+        "downgrade-quarantines-the-claim-out-of-the-report",
+        all(c["claim_id"] != debt["claim_id"] for c in report["claims"])
+        and "$18M" not in report["markdown"]
+        and any(
+            q["claim_id"] == debt["claim_id"]
+            and q["reason"] == "challenge_downgraded"
+            and q["status"] == "QUARANTINED"
+            for q in quarantine
+        )
+        and decided["status"] == "FINAL",
+        "claim gone from the body, quarantine record carries the "
+        "challenge reason, approval then went through",
+    )
+
+    # -- the clean case -------------------------------------------------------
+    service = fresh_service("deep-diligence-eval-challenge-clean-")
+    case_id = full_run(service, alder)
+    raised = service.store.list_challenges(case_id)
+    decided = service.decide_report(
+        case_id, analyst="Eval Harness", approve=True
+    )
+    check(
+        "clean-case-fires-nothing-and-approves",
+        raised == [] and decided["status"] == "FINAL",
+        f"challenges recorded: {len(raised)}",
+    )
+    return {
+        "key": "challenge-pass",
+        "checks": checks,
+        "ok": all(c["ok"] for c in checks),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Gold case-pack gate for the Deep Diligence Agent."
@@ -792,6 +1059,25 @@ def main(argv: list[str] | None = None) -> int:
             f"  portfolio check {portfolio_check['name']}: "
             f"{'OK' if portfolio_check['ok'] else 'FAILED'}"
             f" — {portfolio_check['detail']}"
+        )
+    # Challenge pack: the second opinion graded on a case crafted
+    # so named rules fire and a clean case where it fires nothing.
+    # Outside the promotion split, like the budget and red-team
+    # packs.
+    challenge_result = run_challenge_cases(profile_id=args.profile)
+    all_pass = all_pass and challenge_result["ok"]
+    print(
+        f"{challenge_result['key']}: crafted case records its "
+        f"challenges exactly, the gate refuses over open "
+        f"must-answer challenges, rebut / revise / downgrade each "
+        f"answer one, the clean case fires nothing "
+        f"-> {'PASS' if challenge_result['ok'] else 'FAIL'}"
+    )
+    for challenge_check in challenge_result["checks"]:
+        print(
+            f"  challenge check {challenge_check['name']}: "
+            f"{'OK' if challenge_check['ok'] else 'FAILED'}"
+            f" — {challenge_check['detail']}"
         )
     print(
         f"unsupported claims in final reports across all packs: "
