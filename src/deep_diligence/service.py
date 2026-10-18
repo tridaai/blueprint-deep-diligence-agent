@@ -31,6 +31,7 @@ from .budgets import (
     fold_budget_ledger,
     resolve_phase_budget,
 )
+from .challenges import sync_challenges
 from .composer import apply_conflicts, apply_verification, compose_report
 from .conflicts import detect_conflicts
 from .config import Settings
@@ -2041,7 +2042,8 @@ class CaseService:
             result["supported"],
             result["quarantined"],
         )
-        return self._detect_conflicts(case, report)
+        report = self._detect_conflicts(case, report)
+        return self._challenge_draft(case, report)
 
     def _detect_conflicts(self, case: dict, report: dict) -> dict:
         """The conflict pass, after verification: key the supported
@@ -2077,6 +2079,260 @@ class CaseService:
         return apply_conflicts(
             self.store, self.objects, case, report, records
         )
+
+    def _challenge_draft(self, case: dict, report: dict) -> dict:
+        """The challenge pass, after verification and conflict
+        detection: a deterministic second opinion over the draft's
+        supported claims, computed from the stored records (never
+        from composer internals) and stored as challenge records.
+        The report itself is untouched — challenges are the desk's
+        internal review, and no delivered format carries one."""
+        case_id = case["case_id"]
+        outcome = sync_challenges(self.store, case, report)
+        records = outcome["records"]
+        open_now = [r for r in records if r["status"] == "OPEN"]
+        if outcome["minted"] or outcome["superseded"] or outcome["reopened"]:
+            self.store.add_audit(
+                case_id,
+                "challenges_raised",
+                {
+                    "raised": [
+                        {
+                            "challenge_id": r["challenge_id"],
+                            "rule": r["rule"],
+                            "severity": r["severity"],
+                            "claim_id": r["claim_id"],
+                            "question_id": r["question_id"],
+                        }
+                        for r in outcome["minted"]
+                    ],
+                    "reopened": [
+                        r["challenge_id"] for r in outcome["reopened"]
+                    ],
+                    "superseded": [
+                        r["challenge_id"] for r in outcome["superseded"]
+                    ],
+                    "open_must_answer": sum(
+                        1 for r in open_now if r["severity"] == "must_answer"
+                    ),
+                    "open_advisory": sum(
+                        1 for r in open_now if r["severity"] == "advisory"
+                    ),
+                },
+            )
+        if open_now:
+            log.info(
+                "case %s challenges: %d open (%d must-answer)",
+                case_id,
+                len(open_now),
+                sum(1 for r in open_now if r["severity"] == "must_answer"),
+            )
+        return report
+
+    def run_challenge_pass(self, case_id: str) -> list[dict]:
+        """Re-run the challenge pass over the case's current draft
+        and return the case's full challenge history. The pass is
+        idempotent by content — on an unchanged draft this changes
+        nothing. It runs automatically on every fresh draft; this
+        entry point exists so the desk (and the tests) can re-run
+        it on demand."""
+        case = self._require_case(case_id)
+        report = self.store.get_report(case_id)
+        if report is None:
+            raise GateError(f"case {case_id} has no report to challenge")
+        self._challenge_draft(case, report)
+        return self.store.list_challenges(case_id)
+
+    def decide_challenge(
+        self,
+        case_id: str,
+        challenge_id: str,
+        analyst: str,
+        action: str,
+        note: str = "",
+        counter_evidence_ids: list[str] | tuple[str, ...] = (),
+    ) -> dict:
+        """The analyst's three answers to a challenge — and only three.
+
+        rebut: the claim stands, and the analyst says why in
+        writing, naming counter-evidence from the case. The
+        rebuttal rides the case (this record and the audit trail),
+        never the report body.
+
+        revise: the objection lands — the claim is sent back for
+        re-investigation, the reinvestigate path's effects applied
+        to a supported claim: its finding leaves the case record,
+        so a re-run has to re-derive it, and the case returns to
+        APPROVED, ready to execute again.
+
+        downgrade: the claim stops standing as support. It is
+        quarantined through the existing shelf with reason
+        challenge_downgraded and leaves the report body now, the
+        draft re-rendered without it; the quarantine record can
+        still be decided (sent back or dropped) like any other.
+
+        revise and downgrade need a claim to act on, so they are
+        refused for question- and case-level challenges — those
+        are answered by rebuttal.
+        """
+        case = self._require_case(case_id)
+        if case["status"] not in ("DRAFT_READY", "BUDGET_EXHAUSTED"):
+            raise GateError(
+                f"no report at the gate to answer challenges on "
+                f"(status {case['status']})"
+            )
+        if action not in ("rebut", "revise", "downgrade"):
+            raise ValueError(
+                f"unknown challenge action {action!r}; expected "
+                "'rebut', 'revise' or 'downgrade'"
+            )
+        record = self.store.get_challenge(case_id, challenge_id)
+        if record is None:
+            raise KeyError(challenge_id)
+        if record["status"] != "OPEN":
+            raise GateError(
+                f"challenge {challenge_id} is already {record['status']}"
+            )
+        answer: dict = {"analyst": analyst, "note": note, "at": utcnow()}
+        if action == "rebut":
+            if not note.strip():
+                raise ValueError("a rebuttal must say why the claim stands")
+            named = [e for e in counter_evidence_ids if e]
+            if not named:
+                raise ValueError(
+                    "a rebuttal must name counter-evidence from the case"
+                )
+            known = {
+                ev["evidence_id"] for ev in self.store.list_evidence(case_id)
+            }
+            foreign = [e for e in named if e not in known]
+            if foreign:
+                raise ValueError(
+                    "counter-evidence must come from this case; "
+                    f"unknown evidence: {', '.join(sorted(foreign))}"
+                )
+            answer["disposition"] = "rebutted"
+            answer["counter_evidence_ids"] = named
+            record["disposition"] = "rebutted"
+        elif action == "revise":
+            if record["claim_id"] is None:
+                raise GateError(
+                    f"challenge {challenge_id} names no single claim "
+                    "to send back; answer it with a rebuttal"
+                )
+            answer["disposition"] = "revised"
+            record["disposition"] = "revised"
+            self.store.delete_finding(case_id, record["finding_id"])
+        else:  # downgrade
+            if record["claim_id"] is None:
+                raise GateError(
+                    f"challenge {challenge_id} names no single claim "
+                    "to downgrade; answer it with a rebuttal"
+                )
+            answer["disposition"] = "downgraded"
+            record["disposition"] = "downgraded"
+            answer["quarantine_id"] = self._quarantine_for_downgrade(
+                case, record
+            )
+        record["status"] = "ANSWERED"
+        record["answers"] = [*record.get("answers", []), answer]
+        self.store.update_challenge(case_id, record)
+        event = {
+            "rebut": "challenge_rebutted",
+            "revise": "challenge_revised",
+            "downgrade": "challenge_downgraded",
+        }[action]
+        payload: dict = {
+            "challenge_id": challenge_id,
+            "rule": record["rule"],
+            "severity": record["severity"],
+            "claim_id": record["claim_id"],
+            "question_id": record["question_id"],
+            "analyst": analyst,
+            "note": note,
+        }
+        if action == "rebut":
+            payload["counter_evidence_ids"] = answer["counter_evidence_ids"]
+        if action == "revise":
+            payload["finding_id"] = record["finding_id"]
+        if action == "downgrade":
+            payload["quarantine_id"] = answer["quarantine_id"]
+        self.store.add_audit(case_id, event, payload)
+        log.info(
+            "case %s challenge %s %s by %s",
+            case_id,
+            challenge_id,
+            answer["disposition"],
+            analyst,
+        )
+        if action == "revise":
+            self.store.update_case(case_id, status="APPROVED")
+        return record
+
+    def _quarantine_for_downgrade(self, case: dict, challenge: dict) -> str:
+        """Quarantine a challenged claim through the existing
+        shelf, with reason challenge_downgraded, and re-render the
+        draft without it — the finalize chain rebuilt over the
+        claims that remain, so the ledger, the coverage table, and
+        every grade describe the report the analyst now sees."""
+        case_id = case["case_id"]
+        existing = self.store.list_quarantine(case_id)
+        number = (
+            max(
+                (int(r["quarantine_id"].split("-")[1]) for r in existing),
+                default=0,
+            )
+            + 1
+        )
+        record = {
+            "quarantine_id": f"Q-{number:04d}",
+            "case_id": case_id,
+            "claim_id": challenge["claim_id"],
+            "finding_id": challenge["finding_id"],
+            "question_id": challenge["question_id"],
+            "claim": challenge["claim"],
+            "evidence_ids": list(challenge["evidence_ids"]),
+            "reason": "challenge_downgraded",
+            "failures": [
+                {
+                    "reason": "challenge_downgraded",
+                    "detail": (
+                        f"downgraded at the report gate under challenge "
+                        f"{challenge['challenge_id']} ({challenge['rule']}): "
+                        "the claim no longer stands as support for its "
+                        "question"
+                    ),
+                }
+            ],
+            "status": "QUARANTINED",
+            "verifier_run": None,
+            "origin": "challenge",
+            "challenge_id": challenge["challenge_id"],
+            "created_at": utcnow(),
+            "decided_by": None,
+            "decision_note": None,
+            "decided_at": None,
+        }
+        self.store.replace_quarantine(case_id, [*existing, record])
+        report = self.store.get_report(case_id)
+        verifier_report = self.store.get_verifier_report(case_id)
+        if report is not None and verifier_report is not None:
+            report = apply_verification(
+                self.store,
+                self.objects,
+                case,
+                report,
+                verifier_report,
+                self.store.list_quarantine(case_id),
+            )
+            apply_conflicts(
+                self.store,
+                self.objects,
+                case,
+                report,
+                self.store.list_conflicts(case_id),
+            )
+        return record["quarantine_id"]
 
     def decide_conflict(
         self,
@@ -2266,6 +2522,29 @@ class CaseService:
                     "report cites evidence that has been redacted "
                     f"({flagged}); each flagged claim must be "
                     "acknowledged or sent back before approval"
+                )
+            # Challenge gate: the challenge pass's must-answer
+            # objections are the desk's second opinion in structured
+            # form, and a report does not become final over one.
+            # Each must be answered on its own record — rebutted
+            # with counter-evidence, sent back for re-investigation,
+            # or downgraded — never waved through here. Advisory
+            # challenges never block; they are counted on the case
+            # view for the analyst at this gate.
+            open_must_answer = [
+                c
+                for c in self.store.list_challenges(case_id)
+                if c["status"] == "OPEN" and c["severity"] == "must_answer"
+            ]
+            if open_must_answer:
+                ids = ", ".join(
+                    c["challenge_id"] for c in open_must_answer
+                )
+                raise GateError(
+                    "report has unanswered must-answer challenges "
+                    f"({ids}); each must be answered — rebutted with "
+                    "counter-evidence, sent back for re-investigation, "
+                    "or downgraded — before approval"
                 )
         if approve and report.get("coverage_detail"):
             # Approving a partial report is the analyst's call — and
