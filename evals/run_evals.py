@@ -98,6 +98,9 @@ from deep_diligence.corpus import (  # noqa: E402
     INTEGRITY_CASES,
     RED_TEAM_CASES,
 )
+from deep_diligence.costs import fold_cost_ledger  # noqa: E402
+from deep_diligence.report_model import question_grade  # noqa: E402
+from deep_diligence.tools import build_case_tools  # noqa: E402
 from deep_diligence.evaluation import (  # noqa: E402
     evaluate_case,
     evaluate_dependency_case,
@@ -231,6 +234,298 @@ def run_budget_case(profile_id: str = DEFAULT_PROFILE) -> dict:
         ),
         "missing_after_amendment": sorted(gold_facts - found),
         "within_amended_caps": within_amended,
+    }
+
+
+def run_portfolio_cases(profile_id: str = DEFAULT_PROFILE) -> dict:
+    """The portfolio pack (R15): one engagement, three member
+    cases at three different states — Helvion run to FINAL,
+    Copperline waiting at the report gate (DRAFT_READY), Selene
+    stopped BUDGET_EXHAUSTED — and the portfolio fold graded
+    exactly: the counts by state, the gate list (the workbench
+    queue's own items scoped to members, recomputed here), the
+    cost total recomputed from the cases' own ledgers, the
+    per-question grades recomputed by the one documented rule,
+    and a held member surfaced as held. A second scenario puts
+    the red-team pack's two cross-case subjects in one
+    engagement and replays its attacks there: membership must
+    not widen a citation path — a foreign evidence ID is
+    refused, a mixed citation drops it, the sibling case's fact
+    does not enter this case's ledger check, and engagement-
+    scoped search answers with case-labelled member hits only.
+    Zero tolerance on cross-case citations accepted. The pack
+    grades the portfolio shell, so it stands outside the
+    promotion split, like the budget and red-team packs."""
+    checks: list[dict] = []
+
+    def check(name: str, ok: bool, detail: str = "") -> None:
+        checks.append({"name": name, "ok": bool(ok), "detail": detail})
+
+    def fresh_service(prefix: str) -> CaseService:
+        scratch = Path(tempfile.mkdtemp(prefix=prefix))
+        settings = load_settings(
+            sqlite_path=str(scratch / "diligence.db"),
+            object_dir=str(scratch / "objects"),
+            migrations_dir=str(REPO_ROOT / "migrations"),
+            profile_id=profile_id,
+        )
+        return CaseService(settings)
+
+    def full_run(service: CaseService, gold: dict, final: bool = False) -> str:
+        case = service.create_case(BriefIn(**gold["brief"]))
+        case_id = case["case_id"]
+        service.run_planning(case_id)
+        service.decide_plan(case_id, analyst="Eval Harness", approve=True)
+        service.run_execution(case_id)
+        if final:
+            service.decide_report(case_id, analyst="Eval Harness", approve=True)
+        return case_id
+
+    # -- the fold over three states --------------------------------------
+    service = fresh_service("deep-diligence-eval-portfolio-")
+    engagement = service.create_engagement(
+        "Eval Harness", "Eval Portfolio Mandate", "Eval Client", "Eval Harness"
+    )
+    final_id = full_run(service, GOLD_CASES[0], final=True)
+    draft_id = full_run(service, GOLD_CASES[1])
+    budget_brief = {
+        **GOLD_CASES[2]["brief"],
+        "budget": {
+            **GOLD_CASES[2]["brief"]["budget"],
+            "execution": {"max_steps": 6},
+        },
+    }
+    budget_case = service.create_case(BriefIn(**budget_brief))
+    budget_id = budget_case["case_id"]
+    service.run_planning(budget_id)
+    service.decide_plan(budget_id, analyst="Eval Harness", approve=True)
+    service.run_execution(budget_id)
+    for case_id in (final_id, draft_id, budget_id):
+        service.assign_case_engagement(
+            case_id, engagement["engagement_id"], "Eval Harness"
+        )
+    members = {final_id, draft_id, budget_id}
+    statuses = {
+        cid: service.store.get_case(cid)["status"] for cid in members
+    }
+    check(
+        "states-planted",
+        statuses
+        == {final_id: "FINAL", draft_id: "DRAFT_READY", budget_id: "BUDGET_EXHAUSTED"},
+        f"member states: {sorted(statuses.values())}",
+    )
+    report = service.portfolio_report(engagement["engagement_id"])
+    counts = report["counts_by_status"]
+    check(
+        "fold-counts",
+        report["total_cases"] == 3
+        and counts["FINAL"] == 1
+        and counts["DRAFT_READY"] == 1
+        and counts["BUDGET_EXHAUSTED"] == 1
+        and sum(counts.values()) == 3
+        and {row["case_id"] for row in report["cases"]} == members,
+        f"counts: FINAL {counts['FINAL']}, DRAFT_READY "
+        f"{counts['DRAFT_READY']}, BUDGET_EXHAUSTED "
+        f"{counts['BUDGET_EXHAUSTED']}",
+    )
+    queue = service.workbench_queue()
+    expected_gates = sorted(
+        (item["act"], item["case_id"])
+        for group in queue["groups"]
+        for item in group["items"]
+        if item["case_id"] in members
+    )
+    got_gates = sorted(
+        (item["act"], item["case_id"]) for item in report["gates"]["items"]
+    )
+    check(
+        "fold-gates",
+        got_gates == expected_gates
+        and ("report_decision", draft_id) in got_gates
+        and ("budget_amendment", budget_id) in got_gates
+        and ("conflict_note", draft_id) in got_gates
+        and report["gates"]["oldest_waiting"]["waiting_since"]
+        == min(i["waiting_since"] for i in report["gates"]["items"]),
+        f"gates: {got_gates}",
+    )
+    folds = {
+        cid: fold_cost_ledger(service.store.list_audit(cid)) for cid in members
+    }
+    expected_cost = sum(f["totals"]["cost_usd"] for f in folds.values())
+    per_case_ok = all(
+        row["cost"]["cost_usd"] == float(folds[row["case_id"]]["totals"]["cost_usd"])
+        for row in report["cases"]
+    )
+    check(
+        "fold-cost",
+        report["cost"]["totals"]["cost_usd"] == float(expected_cost)
+        and report["cost"]["totals"]["total_tokens"]
+        == sum(f["totals"]["total_tokens"] for f in folds.values())
+        and per_case_ok,
+        f"cost total ${report['cost']['totals']['cost_usd']:.6f} "
+        f"recomputed from the three ledgers",
+    )
+
+    def expected_grades(case_id: str) -> list[str]:
+        case = service.store.get_case(case_id)
+        claims = service.store.get_report(case_id)["claims"]
+        evidence_by_id = {
+            ev["evidence_id"]: ev
+            for ev in service.store.list_evidence(case_id)
+        }
+        verifier = service.store.get_verifier_report(case_id) or {}
+        weak = {
+            c["claim_id"]
+            for c in verifier.get("checks", [])
+            if c.get("model_check") == "unsupported"
+        }
+        return [
+            question_grade(
+                [c for c in claims if c["question_id"] == q["id"]],
+                evidence_by_id,
+                weak,
+            )
+            for q in case["brief"]["questions"]
+        ]
+
+    check(
+        "fold-grades",
+        all(
+            [g["grade"] for g in row["grades"]] == expected_grades(row["case_id"])
+            for row in report["cases"]
+        ),
+        "per-question grades match the documented rule on every member",
+    )
+    expected_conflicts = sorted(
+        (rec["conflict_id"], cid)
+        for cid in members
+        for rec in service.store.list_conflicts(cid)
+        if rec["status"] == "OPEN"
+    )
+    check(
+        "fold-open-items",
+        sorted((c["conflict_id"], c["case_id"]) for c in report["open_conflicts"])
+        == expected_conflicts,
+        f"open conflicts across the portfolio: {len(expected_conflicts)}",
+    )
+    service.set_legal_hold(final_id, "Eval Harness", "mandate under review")
+    held_report = service.portfolio_report(engagement["engagement_id"])
+    held_row = next(
+        row for row in held_report["cases"] if row["case_id"] == final_id
+    )
+    check(
+        "held-member-surfaced",
+        held_row["flags"] == ["legal_hold"]
+        and held_row["retention"]["legal_hold"] is True
+        and all(
+            row["flags"] == []
+            for row in held_report["cases"]
+            if row["case_id"] != final_id
+        ),
+        "the FINAL member reads as held; the others carry no flags",
+    )
+
+    # -- isolation inside one engagement -------------------------------
+    service2 = fresh_service("deep-diligence-eval-portfolio-iso-")
+    gold = next(c for c in RED_TEAM_CASES if c["kind"] == "cross_case")
+    engagement2 = service2.create_engagement(
+        "Eval Harness", "Eval Isolation Mandate", "Eval Client", "Eval Harness"
+    )
+    case_a = service2.create_case(BriefIn(**gold["briefs"][0]))
+    case_b = service2.create_case(BriefIn(**gold["briefs"][1]))
+    id_a, id_b = case_a["case_id"], case_b["case_id"]
+    for case_id in (id_a, id_b):
+        service2.assign_case_engagement(
+            case_id, engagement2["engagement_id"], "Eval Harness"
+        )
+    tools = {
+        t.name: t.func
+        for t in build_case_tools(service2.store, service2.objects, case_a)
+    }
+    record = tools["record_finding"]
+    mixed = gold["mixed_claim"]
+    foreign = gold["foreign_evidence_id"]
+
+    def attempt(claim: str, fact_ref: str, evidence_ids: list[str]) -> str:
+        return record(
+            question_id=mixed["question_id"],
+            claim=claim,
+            evidence_ids=evidence_ids,
+            fact_ref=fact_ref,
+        )
+
+    result = attempt(mixed["claim"], mixed["fact_ref"], [foreign])
+    check(
+        "foreign-id-refused",
+        result.startswith("ERROR")
+        and service2.store.list_findings(id_a) == [],
+        f"foreign-only citation answered: {result}",
+    )
+    result = attempt(mixed["claim"], mixed["fact_ref"], ["EV-9999"])
+    check(
+        "unknown-id-refused",
+        result.startswith("ERROR")
+        and service2.store.list_findings(id_a) == [],
+        f"unknown citation answered: {result}",
+    )
+    result = attempt(
+        mixed["claim"],
+        mixed["fact_ref"],
+        [mixed["own_evidence_id"], foreign],
+    )
+    findings_a = service2.store.list_findings(id_a)
+    check(
+        "foreign-id-not-carried",
+        not result.startswith("ERROR")
+        and len(findings_a) == 1
+        and findings_a[0]["evidence_ids"] == [mixed["own_evidence_id"]],
+        f"mixed citation recorded citing {findings_a[0]['evidence_ids'] if findings_a else []}",
+    )
+    result = attempt(
+        "Selene's lead product is a rapid respiratory panel that "
+        "returns results in 25 minutes.",
+        "F-SEL-101",
+        ["EV-0001"],
+    )
+    check(
+        "sibling-fact-refused",
+        result.startswith("ERROR")
+        and len(service2.store.list_findings(id_a)) == 1,
+        f"sibling fact cited on own evidence answered: {result}",
+    )
+    own_ids = {
+        ev["evidence_id"] for ev in service2.store.list_evidence(id_a)
+    }
+    cross_case_accepted = sum(
+        1
+        for finding in service2.store.list_findings(id_a)
+        if not set(finding["evidence_ids"]) <= own_ids
+    )
+    check(
+        "no-foreign-citations-recorded",
+        cross_case_accepted == 0,
+        f"recorded findings citing outside the case: {cross_case_accepted}",
+    )
+    scoped = service2.search_cases(
+        "regulatory", engagement_id=engagement2["engagement_id"]
+    )
+    both = service2.search_cases(
+        "revenue", engagement_id=engagement2["engagement_id"]
+    )
+    check(
+        "scoped-search-case-labelled",
+        {hit["case_id"] for hit in scoped} == {id_b}
+        and {hit["case_id"] for hit in both} == {id_a, id_b},
+        "engagement search answers member hits labelled by case, "
+        "and nothing from outside the engagement",
+    )
+    return {
+        "key": "portfolio-mode",
+        "checks": checks,
+        "ok": all(c["ok"] for c in checks),
+        "gates": len(got_gates),
+        "cost_usd": report["cost"]["totals"]["cost_usd"],
+        "cross_case_accepted": cross_case_accepted,
     }
 
 
@@ -475,6 +770,29 @@ def main(argv: list[str] | None = None) -> int:
         f"poisoned claims in reports "
         f"{red_team_counters['poisoned_in_report']} (gate 0)"
     )
+    # Portfolio pack: one engagement with three cases at three
+    # states grades the fold exactly — counts, the gate list,
+    # the cost total recomputed from the cases' own ledgers,
+    # grades by the documented rule, a held member surfaced —
+    # and a second scenario replays the cross-case attacks with
+    # both cases inside one engagement. Outside the promotion
+    # split, like the budget and red-team packs.
+    portfolio_result = run_portfolio_cases(profile_id=args.profile)
+    all_pass = all_pass and portfolio_result["ok"]
+    print(
+        f"{portfolio_result['key']}: fold over FINAL / DRAFT_READY / "
+        f"BUDGET_EXHAUSTED members — {portfolio_result['gates']} "
+        f"gate(s), cost total ${portfolio_result['cost_usd']:.6f}; "
+        f"cross-case citations accepted "
+        f"{portfolio_result['cross_case_accepted']} (gate 0) "
+        f"-> {'PASS' if portfolio_result['ok'] else 'FAIL'}"
+    )
+    for portfolio_check in portfolio_result["checks"]:
+        print(
+            f"  portfolio check {portfolio_check['name']}: "
+            f"{'OK' if portfolio_check['ok'] else 'FAILED'}"
+            f" — {portfolio_check['detail']}"
+        )
     print(
         f"unsupported claims in final reports across all packs: "
         f"{total_unsupported} (gate 0)"
