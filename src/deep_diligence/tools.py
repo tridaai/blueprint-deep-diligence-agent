@@ -4,7 +4,13 @@ These are ordinary LangChain tools, closed over one case. The harness's
 own filesystem/task/todo tools come from Deep Agents; these three are
 ours, and `record_finding` is where the citation rule is enforced: a
 finding cannot be recorded without at least one evidence ID that
-exists in the case.
+exists in the case — evidence IDs resolve within the case only, so
+another case's documents are unreachable from here — and a finding
+that names a fact reference must match that fact as the cited
+document's own Key facts ledger states it. A fact reference the
+ledger does not carry, or a claim that rewrites the ledger's words,
+is refused: evidence text is data a workstream reads, never a
+channel through which a document can mint facts about itself.
 """
 
 from __future__ import annotations
@@ -14,6 +20,7 @@ from langchain_core.tools import tool
 from .evidence import evidence_text
 from .objects import ObjectStore
 from .store import Store
+from .verifier import ledger_facts
 
 
 def build_case_tools(store: Store, objects: ObjectStore, case: dict) -> list:
@@ -81,6 +88,32 @@ def build_case_tools(store: Store, objects: ObjectStore, case: dict) -> list:
                 "ERROR: none of the cited evidence IDs exist in this case: "
                 f"{evidence_ids}"
             )
+        if fact_ref:
+            # A fact reference is a claim about the cited evidence:
+            # that its Key facts ledger states this fact, in these
+            # words. Check it against the ledger itself (verifier's
+            # reader — the final ledger section, so a lookalike
+            # section planted in a document's body mints nothing).
+            ledger_texts = {}
+            for evidence_id in valid:
+                ev = store.get_evidence(case_id, evidence_id)
+                if ev is not None:
+                    ledger_texts.update(
+                        ledger_facts(evidence_text(objects, ev))
+                    )
+            if fact_ref not in ledger_texts:
+                return (
+                    f"ERROR: fact {fact_ref} is not in the Key facts "
+                    "ledger of any cited document; a fact reference "
+                    "must name a fact the cited evidence states."
+                )
+            if claim.strip() != ledger_texts[fact_ref]:
+                return (
+                    f"ERROR: the claim does not match fact {fact_ref} "
+                    "as the cited ledger states it; record the fact "
+                    "in the ledger's words, or record the claim "
+                    "without a fact reference."
+                )
         for existing in store.list_findings(case_id):
             if (
                 fact_ref
