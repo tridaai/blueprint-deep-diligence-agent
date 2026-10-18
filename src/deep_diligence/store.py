@@ -635,6 +635,45 @@ class Store:
         promotions = self.list_promotions()
         return promotions[-1] if promotions else None
 
+    # -- skills library ------------------------------------------------------
+    # Append-only like the promotion log: a published skill version
+    # is what approved plans pin and what findings cite, so the
+    # store offers inserts and reads and no update or delete.
+
+    def add_skill(self, record: dict) -> dict:
+        self._execute(
+            "INSERT INTO skills (name, version, payload, published_at)"
+            " VALUES (?, ?, ?, ?)",
+            (
+                record["name"],
+                record["version"],
+                json.dumps(record),
+                record["published_at"],
+            ),
+        )
+        return record
+
+    def get_skill(self, name: str, version: int) -> dict | None:
+        row = self._fetchone(
+            "SELECT payload FROM skills WHERE name = ? AND version = ?",
+            (name, version),
+        )
+        return json.loads(row["payload"]) if row else None
+
+    def list_skills(self) -> list[dict]:
+        rows = self._fetchall(
+            "SELECT payload FROM skills ORDER BY name, version"
+        )
+        return [json.loads(r["payload"]) for r in rows]
+
+    def latest_skill(self, name: str) -> dict | None:
+        row = self._fetchone(
+            "SELECT payload FROM skills WHERE name = ?"
+            " ORDER BY version DESC LIMIT 1",
+            (name,),
+        )
+        return json.loads(row["payload"]) if row else None
+
     # -- execution checkpoints --------------------------------------------------
     def save_checkpoint(self, case_id: str, checkpoint: dict) -> dict:
         # One row per case, replaced as execution progresses: the
