@@ -621,7 +621,9 @@ end to end on the stub with the deployment recorded on the
 case, its runs, and its trace, while hosted without a database
 URL, local with a live default, hosted-self without its base
 URL, and an unknown profile name each refuse by name. The pytest suite
-(318 tests) covers the gates, the budget caps, the evidence backend,
+(319 tests — 318 run everywhere, plus a Postgres conformance leg
+that skips unless `DD_TEST_DATABASE_URL` names a scratch database)
+covers the gates, the budget caps, the evidence backend,
 the citation rules, the ledger's drift gate, the verifier and
 quarantine, conflict detection and handling, per-phase budgets,
 the budget ledger, the partial-report protocol, amendment, the
@@ -715,6 +717,25 @@ since the deployment-profiles round — the deployment profile and
 the active harness profile. The
 development profile needs none of it: SQLite at `./data/diligence.db`
 (env `SQLITE_PATH`) and a local object directory.
+
+Verified live on 2026-10-18 against PostgreSQL 16.15 + pgvector
+0.8.7 — the release-hardening round ran the production store for
+the first time, and it had a real defect: every payload read
+assumed SQLite's wire shape (Postgres's JSONB columns arrive from
+psycopg already parsed), so the hosted profile could not boot at
+all. Fixed at the store layer, with the fix's regression test kept
+in the suite as the env-gated conformance leg described in the
+Evals section. After the fix, the hosted profile booted against
+Postgres and ran a gold case end to end over HTTP — plan,
+approval, execution, report approval — to FINAL, with the result
+read back from the database itself; a fresh-database prod smoke
+passed the same way. The unit suite keeps per-test SQLite stores
+(that is its fixture contract); the Postgres adapter is proven by
+the conformance leg and the hosted boot, not by re-running the
+unit suite against a shared database. The compose topology itself
+was not run — there is no Docker in the verification environment —
+so the Docker build remains the one unverified piece of the
+production story.
 
 ## Deployment profiles
 
