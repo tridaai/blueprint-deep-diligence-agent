@@ -60,6 +60,14 @@ from .profiles import ProfileError, load_profile
 from .promotion import ProfileGate
 from .report_model import export_report, model_sections
 from .schedule import build_handoff, plan_defects, waves, workstream_dependencies
+from .skills import (
+    SkillError,
+    plan_skill_pins,
+    resolve_plan_skills,
+    seed_skills,
+    skill_mount_files,
+    validate_skill,
+)
 from .store import Store, build_store, utcnow
 from .tools import build_case_tools
 from .verifier import verify_case
@@ -123,13 +131,22 @@ class CaseService:
         # analyst-registered records are never overwritten).
         seed_sources(self.store)
         self.profile = self._resolve_active_profile()
+        # The skills library: the shipped artifacts are seeded
+        # into the store — the runtime library of record — before
+        # any case work. Seeding validates structurally and is
+        # fail-closed (a malformed artifact refuses the startup);
+        # the profile binding is checked where a skill is loaded
+        # for a role: at publish and at the plan gate.
+        self.skill_seeds = seed_skills(self.store, settings.skills_dir)
         self.gate = ProfileGate(self.store, settings.profile_dir)
         self.objects: ObjectStore = build_object_store(settings)
         log.info(
-            "harness profile %s v%d (target %s)",
+            "harness profile %s v%d (target %s); skills library holds "
+            "%d version(s)",
             self.profile.id,
             self.profile.version,
             self.profile.target_model,
+            len(self.store.list_skills()),
         )
 
     def _resolve_active_profile(self):
@@ -191,6 +208,38 @@ class CaseService:
         )
         return record
 
+    # -- skills library -----------------------------------------------------
+    def list_skills(self) -> list[dict]:
+        return self.store.list_skills()
+
+    def publish_skill(self, analyst: str, artifact: dict) -> dict:
+        """Publishing a skill version is a recorded act — and the
+        record is itself the gate. The artifact is validated
+        fail-closed against the active profile BEFORE anything is
+        stored, so a version that is malformed, or whose method
+        names tools beyond a role's allowlist under this profile,
+        can never enter the library. Versions extend a name's line
+        by exactly one: re-publishing an existing version, or
+        skipping ahead of the line, is refused — a published
+        version is never edited and never forked."""
+        skill = validate_skill(artifact, "publish request", self.profile)
+        latest = self.store.latest_skill(skill.name)
+        expected = latest["version"] + 1 if latest else 1
+        if skill.version != expected:
+            raise SkillError(
+                f"skill {skill.name!r}: version {skill.version} cannot "
+                f"be published — the library's line for this name is "
+                f"at version {latest['version'] if latest else 0}, so "
+                f"the next publishable version is {expected}"
+            )
+        record = {
+            **skill.artifact(),
+            "origin": "published",
+            "published_by": analyst,
+            "published_at": utcnow(),
+        }
+        return self.store.add_skill(record)
+
     # -- helpers ------------------------------------------------------------
     def _require_case(self, case_id: str) -> dict:
         case = self.store.get_case(case_id)
@@ -199,7 +248,16 @@ class CaseService:
         return case
 
     def _backend(self, case_id: str) -> EvidenceBackend:
-        return EvidenceBackend(self.store, self.objects, case_id)
+        # The case's filesystem mounts the skills its approved
+        # plan pins, read-only at /skills/<name>.md (backend.py),
+        # resolved from the stored plan on every build so a run
+        # always sees exactly the pins in force for the case.
+        return EvidenceBackend(
+            self.store,
+            self.objects,
+            case_id,
+            skill_files=skill_mount_files(self.store, case_id),
+        )
 
     def _flush_audit(self, case_id: str, sink: list) -> None:
         for event, payload in sink:
@@ -219,7 +277,12 @@ class CaseService:
         """
         case_id = case["case_id"]
         backend = self._backend(case_id)
-        tools = build_case_tools(self.store, self.objects, case)
+        tools = build_case_tools(
+            self.store,
+            self.objects,
+            case,
+            skills_by_question=plan_skill_pins(self.store, case_id),
+        )
         agent = build_agent(
             model=build_model(self.settings),
             backend=backend,
@@ -426,27 +489,53 @@ class CaseService:
         if case["status"] != "PLAN_READY":
             raise GateError(f"no plan awaiting decision (status {case['status']})")
         plan = self.store.get_plan(case_id)
+        pins: dict[str, list[dict]] = {}
         if approve:
             # The plan gate checks the dependency graph in code
             # (schedule.py): an unknown dependency or a cycle means
             # the plan cannot be scheduled, so it cannot be approved
             # either. The defect is named, and the plan stays at the
             # gate for the analyst to send back.
-            defects = plan_defects(
-                (plan.get("plan") or {}).get("workstreams", [])
-            )
+            workstreams = (plan.get("plan") or {}).get("workstreams", [])
+            defects = plan_defects(workstreams)
             if defects:
                 raise GateError(
                     "plan cannot be approved: " + "; ".join(defects)
                 )
+            # The skill gate rides the same approval (skills.py):
+            # every skill the plan names must be in the library,
+            # must apply to the workstream's role, and must stay
+            # inside the role's tool allowlist under the active
+            # profile. Approval PINS the version each skill runs
+            # under — the pin is stamped on the plan artifact here,
+            # so execution, re-execution, and resume all run under
+            # the version the analyst approved, even if a newer
+            # version is published while the case is in flight.
+            pins, problems = resolve_plan_skills(
+                self.store, self.profile, workstreams
+            )
+            if problems:
+                raise GateError(
+                    "plan cannot be approved: " + "; ".join(problems)
+                )
+            for entry in workstreams:
+                if entry["question_id"] in pins:
+                    entry["skills"] = pins[entry["question_id"]]
         plan["status"] = "APPROVED" if approve else "REJECTED"
         plan["decided_by"] = analyst
         plan["decision_note"] = note
         self.store.update_plan(case_id, plan)
+        audit_payload: dict = {
+            "version": plan["version"],
+            "analyst": analyst,
+            "note": note,
+        }
+        if pins:
+            audit_payload["skills"] = pins
         self.store.add_audit(
             case_id,
             "plan_approved" if approve else "plan_rejected",
-            {"version": plan["version"], "analyst": analyst, "note": note},
+            audit_payload,
         )
         return self.store.update_case(
             case_id, status="APPROVED" if approve else "PLAN_REJECTED"
@@ -523,6 +612,17 @@ class CaseService:
                 [ws["question_id"] for ws in layer] for layer in schedule
             ],
         }
+        # The skills this execution runs under, by workstream —
+        # the pins on the approved plan, recorded so the trail
+        # attributes the run's findings to the method versions in
+        # force, not just to a date.
+        skill_pins = {
+            entry["question_id"]: entry["skills"]
+            for entry in workstreams
+            if entry.get("skills")
+        }
+        if skill_pins:
+            started["skills"] = skill_pins
         if resumed:
             started["resumed"] = True
         if skip:

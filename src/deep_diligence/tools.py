@@ -11,6 +11,12 @@ document's own Key facts ledger states it. A fact reference the
 ledger does not carry, or a claim that rewrites the ledger's words,
 is refused: evidence text is data a workstream reads, never a
 channel through which a document can mint facts about itself.
+
+When the case's approved plan pins skills for a question (skills.py),
+`record_finding` also stamps the finding with those pins: the
+provenance that says which governed methods the workstream ran
+under when it produced the finding. The stamp comes from the plan,
+never from anything the model says.
 """
 
 from __future__ import annotations
@@ -23,9 +29,20 @@ from .store import Store
 from .verifier import ledger_facts
 
 
-def build_case_tools(store: Store, objects: ObjectStore, case: dict) -> list:
+def build_case_tools(
+    store: Store,
+    objects: ObjectStore,
+    case: dict,
+    skills_by_question: dict[str, list[dict]] | None = None,
+) -> list:
     case_id = case["case_id"]
     question_ids = {q["id"] for q in case["brief"]["questions"]}
+    # The skills each question's workstream runs under, pinned by
+    # the plan gate (skills.py): a finding recorded for a question
+    # carries the pins as its provenance — which governed methods
+    # produced it. The mapping is read from the approved plan by
+    # the caller; the tool only stamps what it is handed.
+    skills_by_question = skills_by_question or {}
 
     @tool
     def search_corpus(query: str) -> str:
@@ -128,6 +145,11 @@ def build_case_tools(store: Store, objects: ObjectStore, case: dict) -> list:
                 "claim": claim.strip(),
                 "evidence_ids": valid,
                 "fact_ref": fact_ref or None,
+                **(
+                    {"skills": list(skills_by_question[question_id])}
+                    if skills_by_question.get(question_id)
+                    else {}
+                ),
             },
         )
         return f"Recorded {finding['finding_id']} citing {', '.join(valid)}."

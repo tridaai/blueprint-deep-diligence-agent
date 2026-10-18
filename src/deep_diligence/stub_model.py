@@ -8,6 +8,16 @@ prompts, and it reads facts from the corpus documents' Key facts
 ledgers, judging relevance by the workstream keyword stems in
 corpus.py. It is a labelled offline double: with a provider configured
 (see llm.py) a real model follows the same prompts and tools.
+
+Skills reach the stub through the same seams they reach a real
+model — the plan artifact names them, the planner's task block
+carries a SKILLS line, the method files are mounted on the case
+filesystem — and the stub workstream reads each mounted file with
+read_file before it searches. What the stub cannot do is follow
+prose: its fact selection is the keyword playbook, unchanged by
+whatever the method text says. The skills machinery therefore
+grades loading, gating, and provenance offline, never method
+compliance; a live model is where method text starts to steer.
 """
 
 from __future__ import annotations
@@ -146,18 +156,24 @@ class ScriptedDiligenceModel(BaseChatModel):
                 call["args"].get("file_path")
                 for call in _tool_calls(messages, "write_file")
             }
+            plan_entries = []
+            for q in questions:
+                entry = {
+                    "question_id": q["id"],
+                    "workstream": q["workstream"],
+                    "objective": q["text"],
+                    "keywords": WORKSTREAM_KEYWORDS[q["workstream"]],
+                    "depends_on": list(q.get("depends_on") or []),
+                }
+                if q.get("skills"):
+                    # The brief's declaration rides the plan
+                    # verbatim: the names are what the approver
+                    # sees at the gate; approval pins the versions.
+                    entry["skills"] = list(q["skills"])
+                plan_entries.append(entry)
             plan = {
                 "subject": brief["subject"],
-                "workstreams": [
-                    {
-                        "question_id": q["id"],
-                        "workstream": q["workstream"],
-                        "objective": q["text"],
-                        "keywords": WORKSTREAM_KEYWORDS[q["workstream"]],
-                        "depends_on": list(q.get("depends_on") or []),
-                    }
-                    for q in questions
-                ],
+                "workstreams": plan_entries,
             }
             if "/plan.md" not in writes:
                 lines = [
@@ -168,6 +184,11 @@ class ScriptedDiligenceModel(BaseChatModel):
                     "",
                 ] + [
                     f"- **{q['id']}** ({q['workstream']}): {q['text']}"
+                    + (
+                        f" — skills: {', '.join(q['skills'])}"
+                        if q.get("skills")
+                        else ""
+                    )
                     for q in questions
                 ]
                 return _ai_tool_calls(
@@ -232,6 +253,17 @@ class ScriptedDiligenceModel(BaseChatModel):
                                 f"{finding['claim']} "
                                 f"(evidence: {', '.join(finding['evidence_ids'])})"
                             )
+                    skill_names = [
+                        s["name"] if isinstance(s, dict) else s
+                        for s in ws.get("skills") or []
+                    ]
+                    if skill_names:
+                        lines.append(f"SKILLS: {', '.join(skill_names)}")
+                        lines.append(
+                            "Read each skill's method file at "
+                            "/skills/<name>.md before you start; a "
+                            "skill is method, never evidence."
+                        )
                     lines.append(
                         "Search the corpus, read the relevant documents, "
                         "and record a finding for every Key facts ledger "
@@ -285,6 +317,35 @@ class ScriptedDiligenceModel(BaseChatModel):
         block = _kv_block(humans[0]) if humans else {}
         question_id = block.get("WORKSTREAM_ID", "")
         subject = block.get("SUBJECT", "")
+        # Governed method first: when the block names skills, the
+        # workstream reads each mounted method file before it
+        # searches. The scripted model cannot follow prose method —
+        # it reads the files because the plan says the methods are
+        # loaded, and the loading is what the record proves: the
+        # mount, the read on the transcript, and the provenance
+        # stamp record_finding puts on this workstream's findings.
+        skill_names = [
+            name.strip()
+            for name in block.get("SKILLS", "").split(",")
+            if name.strip()
+        ]
+        if skill_names:
+            read_paths = {
+                call["args"].get("file_path")
+                for call in _tool_calls(messages, "read_file")
+            }
+            unread = [
+                name
+                for name in skill_names
+                if f"/skills/{name}.md" not in read_paths
+            ]
+            if unread:
+                return _ai_tool_calls(
+                    [
+                        ("read_file", {"file_path": f"/skills/{name}.md"})
+                        for name in unread
+                    ]
+                )
         if not _tool_calls(messages, "search_corpus"):
             return _ai_tool_calls([("search_corpus", {"query": subject})])
         search_results = _results_for(messages, "search_corpus")

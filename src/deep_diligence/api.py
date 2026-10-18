@@ -44,6 +44,7 @@ from .models import (
     ResumeIn,
     SectionNoteEditIn,
     SectionNoteIn,
+    SkillPublishIn,
     SourceIn,
     StalenessDecisionIn,
     WorkbenchViewIn,
@@ -51,6 +52,7 @@ from .models import (
 from .profiles import ProfileError, list_profile_ids, load_profile
 from .promotion import PromotionError
 from .service import CaseService, GateError
+from .skills import SkillError
 
 log = logging.getLogger("deep_diligence.api")
 STATIC_INDEX = Path(__file__).parent / "static" / "index.html"
@@ -930,6 +932,49 @@ def create_app(
         except PromotionError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"promotion": record, "active": service.profile.record()}
+
+    # -- skills library ------------------------------------------------------
+    # The governed method library: read openly at the desk,
+    # written by exactly one recorded act — publish, which the
+    # service validates fail-closed against the active profile
+    # before anything is stored. There is deliberately no edit
+    # and no delete route: a published version is what approved
+    # plans pin, so it never changes; a change is a new version.
+    @app.get("/api/skills")
+    def list_skills() -> dict:
+        return {"skills": service.list_skills()}
+
+    @app.get("/api/skills/{name}")
+    def get_skill(name: str) -> dict:
+        versions = [
+            record
+            for record in service.list_skills()
+            if record["name"] == name
+        ]
+        if not versions:
+            raise HTTPException(status_code=404, detail="skill not found")
+        return {"name": name, "versions": versions}
+
+    @app.get("/api/skills/{name}/versions/{version}")
+    def get_skill_version(name: str, version: int) -> dict:
+        record = service.store.get_skill(name, version)
+        if record is None:
+            raise HTTPException(
+                status_code=404, detail="skill version not found"
+            )
+        return record
+
+    @app.post(
+        "/api/skills", status_code=201, dependencies=[Depends(require_api_key)]
+    )
+    def publish_skill(request: SkillPublishIn) -> dict:
+        try:
+            return service.publish_skill(
+                request.analyst,
+                request.model_dump(exclude={"analyst"}),
+            )
+        except SkillError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     return app
 

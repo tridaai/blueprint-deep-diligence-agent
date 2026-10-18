@@ -392,6 +392,35 @@ def build_report_model(
             "did not resolve: " + ", ".join(report["refused_claims"]) + "."
         )
     method_notes += staleness_lines(case.get("staleness_decisions"))
+    # Skill provenance: the governed methods the workstreams ran
+    # under, folded from the findings' own stamps — one line per
+    # question that ran under skills, naming the pinned versions
+    # the plan gate approved. A case that ran under no skills
+    # grows no line: the section names the methods that were
+    # actually in force, never the library's catalogue.
+    workstream_by_question = {
+        q["id"]: q["workstream"] for q in brief["questions"]
+    }
+    skills_by_question: dict[str, list[dict]] = {}
+    for finding in store.list_findings(case_id):
+        for pin in finding.get("skills") or []:
+            slot = skills_by_question.setdefault(finding["question_id"], [])
+            if pin not in slot:
+                slot.append(pin)
+    for question in brief["questions"]:
+        pins = skills_by_question.get(question["id"])
+        if pins:
+            named = ", ".join(
+                f"{pin['name']} v{pin['version']}" for pin in pins
+            )
+            method_notes.append(
+                f"Workstream {question['id']} "
+                f"({workstream_by_question[question['id']]}) ran under "
+                f"governed skill(s): {named}. The method text was "
+                "loaded from the skills library at the pinned "
+                "version(s), and the findings carry the pins as "
+                "their provenance."
+            )
     return {
         "case_id": case_id,
         "subject": brief["subject"],

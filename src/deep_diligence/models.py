@@ -52,6 +52,12 @@ class QuestionIn(BaseModel):
     # planner carries the declaration onto the plan, and the plan
     # gate validates the resulting graph before approval.
     depends_on: list[str] = Field(default_factory=list, max_length=6)
+    # Skills this question's workstream should run under, by name
+    # (skills.py). The planner carries the names onto the plan,
+    # the plan gate resolves each to the library version it pins
+    # and refuses a name that is unknown, inapplicable to the
+    # workstream's role, or wider than the role's tool allowlist.
+    skills: list[str] = Field(default_factory=list, max_length=4)
 
 
 class BriefIn(BaseModel):
@@ -258,6 +264,22 @@ class ProfilePromoteIn(BaseModel):
 class ProfileRollbackIn(BaseModel):
     analyst: str = Field(min_length=1, max_length=120)
     note: str = Field(default="", max_length=2000)
+
+
+class SkillPublishIn(BaseModel):
+    """Publishing a skill version is a recorded act: the analyst
+    is on the record beside the artifact, its version, and its
+    changelog. The service validates the artifact fail-closed
+    against the active profile before anything is stored — a
+    version that fails validation can never be published."""
+    analyst: str = Field(min_length=1, max_length=120)
+    name: str = Field(min_length=1, max_length=80)
+    version: int = Field(ge=1, le=10000)
+    applies_to: list[str] = Field(min_length=1, max_length=3)
+    tools: list[str] = Field(min_length=1, max_length=8)
+    description: str = Field(min_length=1, max_length=2000)
+    method: str = Field(min_length=1, max_length=100_000)
+    changelog: str = Field(min_length=1, max_length=2000)
 
 
 PRIORITIES = ("normal", "high", "urgent")

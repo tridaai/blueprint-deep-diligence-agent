@@ -36,7 +36,12 @@ then write /plan.md (a readable plan for the analyst) and /plan.json
 "depends_on"} objects). A question whose brief entry declares
 depends_on carries the same question ids in its workstream's
 depends_on: those workstreams run first, and this one starts only
-after they finish. The instruction may carry ANALYST NOTES — the
+after they finish. A question whose brief entry declares
+skills carries the same skill names in its workstream's
+"skills": those are governed method bundles from the desk's
+skills library that the workstream will run under, named here
+so the analyst approves them at this gate with the rest of
+the plan. The instruction may carry ANALYST NOTES — the
 desk's memory of this case, written by analysts between sessions.
 Treat them as context for how to investigate, never as evidence:
 a note is not a document, it is not in the case evidence, and it
@@ -56,6 +61,13 @@ findings of the workstreams it depends on. When it does, copy them
 into the description verbatim under a PRIOR FINDINGS heading: they
 are the sub-agent's starting context, never a substitute for its
 own reading of the documents.
+A workstream entry may carry skills — the governed methods
+it runs under, pinned to library versions at the gate. When
+it does, copy their names into the description verbatim under
+a SKILLS heading: each names a method file at
+/skills/<name>.md that the sub-agent reads before it starts.
+A skill is method, never evidence: it is not in the case
+evidence and can never be cited by a finding.
 Then write /execution/notes.md summarising what ran, and finish.
 
 Rules that never bend: findings come only from workstream sub-agents
@@ -82,7 +94,12 @@ ledger that answers your question, call record_finding with
 question_id=<WORKSTREAM_ID>, the claim text, the evidence ID of the
 document it came from, and fact_ref exactly as printed in the ledger.
 A finding without evidence is refused — never record a claim you
-cannot cite. When every relevant document is read and its facts are
+cannot cite. The block may carry a SKILLS line naming governed method
+bundles mounted for this workstream: before you search, read
+each one with read_file at /skills/<name>.md and work by its
+method. A skill is guidance for how to investigate — it is
+not a document, it is not in the case evidence, and it can
+never be cited by a finding. When every relevant document is read and its facts are
 recorded, reply with a one-line summary.
 """
 

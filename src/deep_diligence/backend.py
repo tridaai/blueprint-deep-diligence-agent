@@ -5,7 +5,10 @@ case: its files are objects in the object store with an index row in
 the case store, and the case's evidence is mounted read-only under
 /evidence/<EV-ID>.md so the agent reads source documents through the
 same filesystem tools it uses for its own notes. Writes under
-/evidence/ are refused.
+/evidence/ are refused. The skills the case's approved plan pins
+(skills.py) mount the same way under /skills/<name>.md — the method
+text verbatim, read-only: a workstream reads its method from the
+filesystem, and no agent write can reach it.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ from deepagents.backends.utils import create_file_data, slice_read_response
 
 from .evidence import evidence_text
 from .objects import ObjectStore, sha256_hex
+from .skills import SKILLS_PREFIX
 from .store import Store
 
 EVIDENCE_PREFIX = "/evidence/"
@@ -40,12 +44,25 @@ def _now_iso() -> str:
 
 
 class EvidenceBackend:
-    """One case's filesystem: case files writable, evidence read-only."""
+    """One case's filesystem: case files writable, evidence and
+    pinned skills read-only."""
 
-    def __init__(self, store: Store, objects: ObjectStore, case_id: str):
+    def __init__(
+        self,
+        store: Store,
+        objects: ObjectStore,
+        case_id: str,
+        skill_files: dict[str, str] | None = None,
+    ):
         self.store = store
         self.objects = objects
         self.case_id = case_id
+        # The pinned skills mounted at /skills/<name>.md for this
+        # case (path -> method text), resolved by the service from
+        # the approved plan's pins. Not case files: they live in
+        # the library, are shared across cases, and are read-only
+        # here exactly as the evidence mount is.
+        self.skill_files = dict(skill_files or {})
 
     # -- key helpers ------------------------------------------------------
     def _object_key(self, path: str) -> str:
@@ -53,6 +70,9 @@ class EvidenceBackend:
 
     def _is_evidence(self, path: str) -> bool:
         return path.startswith(EVIDENCE_PREFIX)
+
+    def _is_skill(self, path: str) -> bool:
+        return path.startswith(SKILLS_PREFIX)
 
     def _all_files(self) -> dict[str, FileData]:
         files: dict[str, FileData] = {}
@@ -66,6 +86,8 @@ class EvidenceBackend:
             files[path] = create_file_data(
                 evidence_text(self.objects, ev), created_at=ev["retrieved_at"]
             )
+        for path, method in self.skill_files.items():
+            files[path] = create_file_data(method)
         return files
 
     def _write_bytes(self, path: str, data: bytes) -> None:
@@ -133,6 +155,8 @@ class EvidenceBackend:
     def write(self, file_path: str, content: str) -> WriteResult:
         if self._is_evidence(file_path):
             return WriteResult(error="Evidence files are read-only")
+        if self._is_skill(file_path):
+            return WriteResult(error="Skill files are read-only")
         if self.store.get_file_meta(self.case_id, file_path) is not None:
             return WriteResult(
                 error=f"File '{file_path}' already exists. Use edit to modify it."
@@ -149,6 +173,8 @@ class EvidenceBackend:
     ) -> EditResult:
         if self._is_evidence(file_path):
             return EditResult(error="Evidence files are read-only")
+        if self._is_skill(file_path):
+            return EditResult(error="Skill files are read-only")
         content = self.read_text_direct(file_path)
         if content is None:
             return EditResult(error=f"File '{file_path}' not found")
@@ -166,6 +192,8 @@ class EvidenceBackend:
     def delete(self, file_path: str) -> DeleteResult:
         if self._is_evidence(file_path):
             return DeleteResult(error="Evidence files are read-only")
+        if self._is_skill(file_path):
+            return DeleteResult(error="Skill files are read-only")
         if self.store.get_file_meta(self.case_id, file_path) is None:
             return DeleteResult(error=f"File '{file_path}' not found")
         self.store.delete_file_meta(self.case_id, file_path)
@@ -221,7 +249,7 @@ class EvidenceBackend:
     ) -> list[FileUploadResponse]:
         responses = []
         for path, data in files:
-            if self._is_evidence(path):
+            if self._is_evidence(path) or self._is_skill(path):
                 responses.append(
                     FileUploadResponse(path=path, error="permission_denied")
                 )
