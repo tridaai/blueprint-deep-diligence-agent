@@ -284,6 +284,36 @@ is accountable for lives in our code around it:
   review — they ride the case (`GET /api/cases/{id}/challenges`,
   the console's Challenge pass panel) and never the report record,
   so no delivered format carries one.
+- **Governed skills: method as a versioned library.** The desk's
+  investigative method lives in a **skills library** — reusable
+  instruction bundles (`revenue-bridge` for the financial scan,
+  `contradiction-hunting` for every role, `source-triangulation`
+  for the market scan) held as versioned artifacts under `skills/`
+  behind a fail-closed strict loader, seeded into the store at
+  startup and extended only by **publishing**: a recorded act whose
+  artifact is validated against the active profile before anything
+  is stored. The loader's tool rule is the governance heart: a
+  skill names the case tools its method uses, and a name outside
+  the loading role's profile allowlist refuses — a skill may
+  narrow a role's method, never widen its tools. A brief question
+  may declare skills by name; the planner carries the names onto
+  the plan artifact, and **the plan gate pins the version**:
+  approval resolves each name to the library version in force,
+  stamps the pin on the plan, and refuses — named — a skill that
+  is unknown, that does not apply to the workstream's role, or
+  that the profile has narrowed out. At execution the pinned
+  method text mounts read-only at `/skills/<name>.md` on the
+  case filesystem (the evidence mount's discipline), the
+  workstream reads it before it searches, and **every finding
+  records the pins** — provenance that folds into the report's
+  Method section. A version published mid-case moves nothing for
+  a case whose plan already pinned the older one; there is no
+  edit or delete route for a published version, because the pins
+  and the findings that cite them must keep meaning what they
+  meant. One honesty note: the offline stub reads the mounted
+  files through the same playbook step a real model would, but
+  it cannot follow prose — the offline gates grade loading,
+  gating, and provenance, not method compliance.
 - **One report model, three formats.** The composed report is a
   structured model first; the markdown draft, a self-contained
   print-ready HTML page (inline CSS, no external assets), and a
@@ -532,7 +562,16 @@ single-source headline figures, one advisory stale side of a
 conflict), approval refuses while a must-answer stands, and the
 rebut, revise, and downgrade paths each answer one; Alder &
 Voss, whose figures are each stated by two documents that
-agree, records no challenges and approves unimpeded. The pytest suite
+agree, records no challenges and approves unimpeded. The skills
+pack grades the library on a brief that names two skills:
+the names ride the plan, approval pins version 1 of each, the
+pinned text mounts read-only, every finding of the named
+workstreams carries its pins with recall at the full gold set,
+and the report's Method section names what ran — while a
+role-mismatched name and an unknown name refuse at the gate,
+and a tool-widening version and a line-skipping version refuse
+at publish, the mid-case publish leaving the pinned case on
+version 1 and the next approved plan pinning version 2. The pytest suite
 (253 tests) covers the gates, the budget caps, the evidence backend,
 the citation rules, the ledger's drift gate, the verifier and
 quarantine, conflict detection and handling, per-phase budgets,
@@ -578,7 +617,11 @@ set recorded exactly, the approval gate over open must-answer
 challenges, the three dispositions and their validations, the
 advisory tier never blocking, idempotency by content,
 supersede-never-delete on a moved draft, and no challenge in
-any delivered format.
+any delivered format, and the skills library: the strict
+loader's refusals, the publish discipline, the plan-gate pins
+and refusals, the profile-relative tool rule at publish and at
+the gate, the read-only mount, finding provenance, and the
+byte-stability of skill-free cases.
 
 The eval runner also runs the packs under any other profile —
 `python evals/run_evals.py --profile openai-gpt` — with the report
@@ -641,6 +684,19 @@ development profile needs none of it: SQLite at `./data/diligence.db`
   figures, dates, and named entities against cited text — it does
   not judge narrative plausibility, and its optional model check is
   advisory only.
+- Skills steer by prose, and prose can be governed only so far.
+  The library controls which method text a workstream loads, at
+  which pinned version, under which profile's tool allowlist —
+  it cannot make a model follow the method, and the offline stub
+  demonstrably does not: its fact selection is a fixed keyword
+  playbook whatever the method text says, which is why the
+  offline gates grade the loading, the gating, and the
+  provenance, and method compliance is a live-model property
+  that only a live-mode run can measure. Publishing writes to
+  the store, never to the repo's `skills/` directory, so a
+  deployment's published versions live with its data and the
+  shipped files remain the seed set; a store reset returns the
+  library to the seeds.
 - Budgets cap each run (planning and execution are guarded
   separately) rather than the case as a whole.
 - Costs are priced from the governed table's list rates, not from
@@ -702,6 +758,9 @@ src/deep_diligence/
                   opinion over the verified draft, its governed
                   rules, content-keyed sync (supersede, never
                   delete), and the analyst's three dispositions
+  skills.py       the skills library: versioned method artifacts,
+                  the fail-closed loader with its tool rule, the
+                  startup seed, and the plan gate's pin resolution
   continuity.py   staleness keying: which workstreams a document
                   that arrived mid-case speaks to, scored in code
   governance.py   source governance: the registry and its corpus
@@ -726,6 +785,10 @@ src/deep_diligence/
   static/         the console (one static HTML file)
 profiles/         the harness profile artifacts (offline-stub,
                   openai-gpt), versioned JSON, strictly validated
+skills/           the shipped skill artifacts (revenue-bridge,
+                  contradiction-hunting, source-triangulation),
+                  one versioned JSON file per version, strictly
+                  validated and seeded into the store at startup
 pricing/          the governed price table (price-table.json):
                   per-model input/output rates, versioned JSON,
                   strictly validated like the profiles

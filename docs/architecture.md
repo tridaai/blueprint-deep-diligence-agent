@@ -815,6 +815,96 @@ which the gate, the dispositions, and the supersede semantics
 apply unchanged. The records are the contract; who or what
 proposes them is a deployment choice.
 
+## The skills library
+
+A skill is governed, versioned **method**: how a workstream should
+run its investigation, written once by the desk and loaded into a
+sub-agent's context when a case's plan names it. It is distinct
+from the neighbouring concepts by what it is not: not case memory
+(analyst notes are one case's facts and context), not evidence (a
+skill can never be cited by a finding), and not a harness profile
+(a profile shapes the build for a model — prompts it assembles,
+tools it allows; a skill is method that runs under whichever
+profile is active).
+
+**Artifacts and the loader.** A skill is a JSON artifact — name,
+version, the workstreams it applies to, the case tools its method
+uses, a description, the method text, a changelog — one file per
+version under `skills/` (`<name>.v<version>.json`), validated by a
+fail-closed strict loader (`skills.py`) in the profiles
+discipline: exact keys, the file name part of the artifact's
+identity, every refusal a named `SkillError`. The shipped library
+is three skills: `revenue-bridge` (financial-scan: reconcile a
+headline figure across documents, naming every bridge item),
+`contradiction-hunting` (all roles: hunt the second source on
+every primary figure), `source-triangulation` (market-scan: no
+market claim from a single secondary source). At startup the
+artifacts seed into the store's `skills` table (migration 0012) —
+the runtime library of record — idempotently, the source
+registry's pattern: a version already in the store is never
+overwritten by the file that shipped it.
+
+**The tool rule.** A skill may narrow a role's method but never
+widen its tools. Wherever a skill is validated against a harness
+profile — at publish, and again at the plan gate — every tool it
+names must already sit in that role's allowlist under that
+profile, or validation refuses with the excess named. The rule is
+profile-relative on purpose: under `openai-gpt`, whose market-scan
+has no document reader, a market skill naming `read_document`
+refuses, while the same artifact is unremarkable under the wider
+offline profile. A profile promotion that narrows a role can
+therefore retire a skill from approvability — at the gate, in the
+open, never silently at runtime.
+
+**Selection and the pin.** Brief questions declare skills by name
+(`QuestionIn.skills`), the planner carries the names onto the
+plan artifact and its readable form, and the **plan gate** is
+where the library binds to the case: `decide_plan`, on approval,
+resolves every named skill (`skills.resolve_plan_skills`) —
+unknown names, role mismatches, and tools beyond the role's
+allowlist each refuse approval with the defect named and the plan
+left standing — and stamps the resolved **pins** ({name, version}
+of the library's latest) onto the plan entries, recording them on
+the `plan_approved` audit event. Execution, re-execution, and
+resume all run under the pins: a version published mid-case is
+picked up by the next plan the desk approves, never by a case
+already approved. This is the plan-version discipline applied to
+method.
+
+**Loading and provenance.** At execution the pinned method text
+mounts on the case's virtual filesystem at `/skills/<name>.md`,
+read-only under the evidence mount's discipline (below); the
+planner's task block names the workstream's skills, and the
+sub-agent reads the files before it searches. `record_finding`
+stamps the question's pins onto every finding the workstream
+records — the stamp comes from the approved plan, never from
+anything the model says — and the report model folds the stamps
+into the Method-and-limits section, one line per workstream that
+ran under skills, naming the pinned versions. The execution
+record names the pins too (`execution_started`).
+
+**Publishing.** `POST /api/skills` is the library's only write:
+the analyst, the artifact, and its changelog are the record (the
+publish pattern of the promotion log — append-only rows, no
+update or delete in the store, no edit or delete route).
+Validation against the active profile runs **before** anything
+is stored, so a malformed or tool-widening version can never
+enter the library, and versions extend a name's line by exactly
+one — re-publishing an existing version, or skipping ahead, is
+refused. Publishing writes to the store, not the `skills/`
+directory: the files are the seed set, a deployment's library
+lives with its data, and a store reset returns to the seeds.
+
+**What the offline gate can and cannot grade.** Skills reach the
+scripted stub through the same seams they reach a real model —
+plan artifact, task block, filesystem mount — and the stub
+workstream reads each mounted file with `read_file` as a playbook
+step before it searches. The stub cannot follow prose: its fact
+selection is the keyword playbook, unchanged by the method text.
+The skills eval pack therefore grades loading, gating, pinning,
+and provenance exactly, and claims no outcome difference for the
+method text itself; method compliance is a live-model property.
+
 ## The virtual filesystem
 
 `EvidenceBackend` implements the Deep Agents `BackendProtocol` over
@@ -823,7 +913,10 @@ files (`/plan.json`, `/execution/notes.md`, …) are writable; evidence
 is mounted read-only at `/evidence/<EV-ID>.md`, so the agent reads
 sources through the same `read_file` tool it uses for its own notes,
 and cannot alter them — a write to `/evidence/` returns an error.
-File metadata (path, SHA-256, size) is indexed in the store; bytes
+The skills the case's approved plan pins mount the same way at
+`/skills/<name>.md` — the library's method text verbatim, resolved
+from the plan's pins when the backend is built, read-only under the
+same refusal. File metadata (path, SHA-256, size) is indexed in the store; bytes
 live in the object store.
 
 ## Data model
@@ -845,7 +938,12 @@ itself lives on the case records, never here), `challenges`
 (the challenge pass's records: rule, target, the evidence read,
 severity, status — OPEN, ANSWERED with its dispositions, or
 SUPERSEDED — and the content fingerprint the sync keys on;
-migration 0011). Case records carry the active harness
+migration 0011), `skills` (the library: one append-only row per
+(name, version) — the artifact, its origin (seed or published),
+the publishing analyst, and the timestamp; migration 0012 — a
+global table, not case-scoped, so case deletion never touches
+it, and findings carry skill pins as plain payload fields).
+Case records carry the active harness
 profile's stamp (id, version, target model) from intake, and their
 continuity state: open `stale_marks` and the append-only
 `staleness_decisions`, plus their `retention_class` and the
@@ -1125,3 +1223,16 @@ their defences were built — is `docs/red-team.md`.
   failing the eval pack's citation-correctness grading. The
   optional model check is advisory and recorded; it is never the
   gate.
+- Skills govern loading, not compliance. The library, the gate,
+  and the mount guarantee which method text a workstream runs
+  under and prove it afterwards from the record; whether a model
+  follows the method is observable only in live mode, and the
+  offline stub — which reads the files and then runs its fixed
+  playbook — is the standing demonstration of the difference.
+  Selection is per brief question, declared in the brief and
+  approved at the plan gate; there is no per-case library
+  override and no way for a plan to name a version directly —
+  the pin is always the latest at approval, so a desk that needs
+  an older version approves a plan that names it only by holding
+  the newer publish back, a deliberate consequence of keeping
+  one pin rule.
