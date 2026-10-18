@@ -143,14 +143,32 @@ preserved.
    side. The analyst's only move is to mark the conflict **NOTED**
    with a note, which re-renders into the report; there is no
    delete or resolve path.
-7. **Report gate.** An analyst approves or rejects. Approval first
+7. **Challenge pass.** A deterministic second opinion over the
+   verified draft, computed from the stored records — the claims,
+   their evidence metadata, the conflict records, the grades — and
+   stored as **challenge records**: each names the claim, question,
+   or draft it targets, the governed rule that fired, and the
+   evidence the rule read. The rules look for what verification
+   and conflict detection do not test: a figure claim resting on a
+   single source with no corroboration, a claim leaning on the
+   oldest document in a live conflict, a grade carried by one
+   document repeated, one document behind whole questions. A
+   headline financial figure on a single secondary source is
+   **must-answer**; the rest are **advisory**. The full design is
+   under "The challenge pass" below.
+8. **Report gate.** An analyst approves or rejects. Approval first
    re-verifies the ledger: every cited item's current bytes must
    hash to the value recorded at citation time. A mismatch means the
    evidence changed after the fact — the report is flagged
    **EVIDENCE_DRIFT**, the drift is named in the audit trail, and the
    approval is refused until a re-verification comes back clean.
-   Approval is what makes a report final; the agent itself never
-   issues a recommendation.
+   Approval is also refused while a redaction flag stands open on a
+   claim in the report, and while any must-answer challenge is
+   unanswered — the refusal names the open challenges, and each is
+   answered on its own record (rebutted with counter-evidence,
+   sent back for re-investigation, or downgraded), never waved
+   through at the gate. Approval is what makes a report final; the
+   agent itself never issues a recommendation.
 
 ## The report model
 
@@ -685,6 +703,118 @@ member cases, returning the same case-labelled hits. There is
 no portfolio-level decision or deletion route — the route
 table is tested for their absence, as the workbench's was.
 
+## The challenge pass
+
+Verification asks of each claim: does its evidence support it?
+Conflict detection asks of the claim set: do any two disagree?
+Neither argues against the draft — and a draft can pass both with
+claims that are weak in ways a diligence partner would catch on a
+read: a headline revenue figure resting on a single news article,
+an answer whose number comes from the oldest document in a live
+disagreement, a STRONG grade that is one filing repeated four
+times. The challenge pass (`challenges.py`) is that read, made
+structural: a governed rule set in code, run after verification
+and conflict detection, recording each objection as a **challenge
+record** the analyst must answer before the report gate.
+
+**Independence and determinism.** Like the verifier, the pass
+runs from the stored records only — the report's supported
+claims, the evidence list (kinds, dates, source classes from
+`conflicts.py`), the conflict records, and the grades by the one
+grade rule in `report_model.py`. It never reads composer
+internals. Identity is content: each computed challenge carries a
+fingerprint (SHA-256 over the rule, its target, and the detail the
+rule read), and the sync that persists the pass is keyed by it —
+re-running the pass on an unchanged draft yields the identical
+challenge set, byte for byte (proven by test). When a
+re-composition moves the draft on, the sync recomputes: a live
+record whose target vanished, or whose substance changed under its
+key, is marked **SUPERSEDED**, never deleted, and the fresh
+challenge is minted beside it. One refinement: a challenge answered
+by sending its claim back whose claim returns byte-identical on
+re-investigation **reopens** — the send-back was supposed to change
+something, and the identical claim has not answered the objection.
+
+**The rules.** Four, each named on its record with the evidence it
+read:
+
+- `single_source_figure` — a claim asserting governed-metric
+  figures (the conflict pass's lexicon), citing exactly one
+  evidence item, corroborated by no other claim. Contested claims
+  are excluded; they are the next rule's ground.
+- `oldest_source_on_contested_metric` — a claim on a conflict side
+  whose own evidence includes the oldest document in the
+  disagreement, while another side rests on fresher evidence.
+- `grade_rests_on_one_document` — a question graded STRONG or
+  STANDARD whose claims, between them, cite exactly one document.
+  The grade rule counts claims and requires a primary source for
+  STRONG, so a strong grade can never rest on a single claim or a
+  lone secondary source; repetition of one document is the gap it
+  cannot see, and it is the honest form of "a grade that outruns
+  its evidence" in this design.
+- `one_document_carries_questions` — one document is the sole
+  evidence behind two or more questions' answers: the draft as a
+  whole leans on a single source. (Per-question workstream
+  concentration cannot occur here — a question has exactly one
+  workstream by design — so the pass reads concentration where it
+  can actually happen: the evidence.)
+
+**Severity is a doctrine about what else has eyes on the
+weakness.** A **must-answer** challenge is one nothing else in the
+pipeline surfaces: today, exactly the `single_source_figure` shape
+where the figure is a headline financial metric (revenue, revenue
+growth, gross margin, EBITDA margin, operating cash flow, net
+debt, debt, cash, funding raised) and the single source is
+secondary class. Everything else is **advisory** — recorded,
+counted on the case view at the gate, never blocking — because
+each sits beside something the desk already sees: the conflict is
+in the report permanently, the grade is printed on the question.
+
+**The gate and the answers.** `decide_report` refuses approval
+while any must-answer challenge is OPEN, naming the open
+challenges (rejection is never blocked). The analyst answers each
+challenge on its own record, with exactly three dispositions:
+
+- **rebut** — the claim stands. Requires a written rebuttal and
+  counter-evidence named from the case (IDs the service validates
+  against the case's evidence). The rebuttal rides the case — the
+  challenge record and the audit trail — never the report body.
+- **revise** — the claim is sent back for re-investigation: the
+  reinvestigate path's effects applied to a supported claim. Its
+  finding leaves the case record and the case returns to APPROVED.
+  (No quarantine record is created: quarantine is the verifier's
+  shelf, and this claim was never quarantined.)
+- **downgrade** — the claim stops standing as support. It is
+  quarantined through the existing shelf with reason
+  `challenge_downgraded` and leaves the report body immediately,
+  the draft re-rendered through the finalize chain so coverage,
+  grades, and the ledger describe what remains. The shelf record
+  can then be decided like any other (sent back or dropped).
+
+Question- and case-level challenges name no single claim, so
+revise and downgrade are refused for them; they are answered by
+rebuttal.
+
+**Internal review, never delivered.** Challenges ride the case —
+the `challenges` table (migration 0011), `GET
+/api/cases/{id}/challenges`, the console's Challenge pass panel —
+and never the report record, so no delivered format (markdown,
+HTML, JSON export) can carry one; the eval pack asserts their
+absence from all three. The report's readers see the desk's
+findings; the desk sees its own second opinion.
+
+**Deployment variant.** The graded implementation is the
+deterministic rule set above, per the house rule that judgement
+lives in code and the gate must hold offline. A deployment that
+wants a model-driven challenger can put one behind the same
+record shape: a challenger step proposing challenge contents
+(rule name, target, evidence read, severity) that are validated
+into challenge records — named rules only, evidence IDs checked
+against the case, severity capped by the same doctrine — after
+which the gate, the dispositions, and the supersede semantics
+apply unchanged. The records are the contract; who or what
+proposes them is a deployment choice.
+
 ## The virtual filesystem
 
 `EvidenceBackend` implements the Deep Agents `BackendProtocol` over
@@ -711,7 +841,11 @@ by name), `redactions`, `redaction_flags`, `case_tombstones`,
 analyst and name — the one workbench table, holding no case
 state), `engagements` (the grouping above a case: name, client
 label, owner, and the record's own act history — membership
-itself lives on the case records, never here). Case records carry the active harness
+itself lives on the case records, never here), `challenges`
+(the challenge pass's records: rule, target, the evidence read,
+severity, status — OPEN, ANSWERED with its dispositions, or
+SUPERSEDED — and the content fingerprint the sync keys on;
+migration 0011). Case records carry the active harness
 profile's stamp (id, version, target model) from intake, and their
 continuity state: open `stale_marks` and the append-only
 `staleness_decisions`, plus their `retention_class` and the
@@ -737,7 +871,11 @@ outlives it) — plus report section notes added and edited — plus
 the workbench triage acts: case assignments and priority changes,
 each naming the actor and the value it replaced — plus the
 portfolio acts: cases assigned to and removed from engagements,
-each naming the engagement and the membership it replaced.
+each naming the engagement and the membership it replaced —
+plus the challenge events: passes that raised, reopened, or
+superseded challenges, with the open counts by severity, and the
+three dispositions (rebutted with its counter-evidence named,
+revised, downgraded with its quarantine record named).
 
 ## Models
 

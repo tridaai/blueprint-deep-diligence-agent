@@ -255,6 +255,35 @@ is accountable for lives in our code around it:
   Facts from different periods are different keys and never
   conflict; the same value from two sources is corroboration, and
   its claims sit together on one side of the record.
+- **A second opinion the analyst must answer.** Verification and
+  conflict detection between them still leave a draft nobody has
+  argued against, so a third deterministic pass — the **challenge
+  pass** — examines the verified draft for the weaknesses those
+  passes do not test, and records each one as a **challenge**: the
+  claim (or question, or draft) it targets, the governed rule that
+  fired, and the evidence the rule read. The rules: a figure claim
+  resting on a single source with no corroboration; a claim whose
+  evidence is the oldest document on a contested metric; a support
+  grade resting on one document repeated; one document carrying
+  whole questions. A headline financial figure (revenue, margins,
+  cash flow, debt, funding) standing on a single secondary source
+  is **must-answer** — `decide_report` refuses approval while one
+  stands open, naming it — and the rest are **advisory**: recorded,
+  counted on the case view, never blocking. The analyst answers
+  each challenge on its record, three ways only: **rebut** it in
+  writing, naming counter-evidence from the case; **revise** —
+  send the claim back for re-investigation, its finding deleted
+  and the case returned to APPROVED; or **downgrade** — the claim
+  is quarantined with reason `challenge_downgraded` and leaves the
+  report body, the draft re-rendered without it. The pass runs
+  from the stored records, never composer internals, and is
+  idempotent by content: re-running it on an unchanged draft
+  yields the identical set, and when a re-composition moves the
+  draft on, answered challenges whose target vanished are marked
+  SUPERSEDED, never deleted. Challenges are the desk's internal
+  review — they ride the case (`GET /api/cases/{id}/challenges`,
+  the console's Challenge pass panel) and never the report record,
+  so no delivered format carries one.
 - **One report model, three formats.** The composed report is a
   structured model first; the markdown draft, a self-contained
   print-ready HTML page (inline CSS, no external assets), and a
@@ -496,8 +525,15 @@ attacks with its four counters at zero. The portfolio pack
 grades its three-state fold exactly — counts, gates, and the
 cost total recomputed from the cases' ledgers all match — and
 its in-engagement citation attacks are all refused, with
-cross-case citations accepted at zero. The pytest suite
-(241 tests) covers the gates, the budget caps, the evidence backend,
+cross-case citations accepted at zero. The challenge pack
+grades the second opinion on two crafted subjects: Kestrel
+Avionics records exactly its three challenges (two must-answer
+single-source headline figures, one advisory stale side of a
+conflict), approval refuses while a must-answer stands, and the
+rebut, revise, and downgrade paths each answer one; Alder &
+Voss, whose figures are each stated by two documents that
+agree, records no challenges and approves unimpeded. The pytest suite
+(253 tests) covers the gates, the budget caps, the evidence backend,
 the citation rules, the ledger's drift gate, the verifier and
 quarantine, conflict detection and handling, per-phase budgets,
 the budget ledger, the partial-report protocol, amendment, the
@@ -537,7 +573,12 @@ records, the fold graded against hand-built member records
 past-retention members surfaced, engagement-scoped search,
 cross-case citation inside one engagement refused, and the
 route table's proof that no portfolio-level decision or
-deletion route exists.
+deletion route exists, and the challenge pass: the crafted
+set recorded exactly, the approval gate over open must-answer
+challenges, the three dispositions and their validations, the
+advisory tier never blocking, idempotency by content,
+supersede-never-delete on a moved draft, and no challenge in
+any delivered format.
 
 The eval runner also runs the packs under any other profile —
 `python evals/run_evals.py --profile openai-gpt` — with the report
@@ -657,6 +698,10 @@ src/deep_diligence/
   conflicts.py    conflict detection: keys supported claims by
                   (entity, metric, period) and records where they
                   assert different values, with source classes
+  challenges.py   the challenge pass: the deterministic second
+                  opinion over the verified draft, its governed
+                  rules, content-keyed sync (supersede, never
+                  delete), and the analyst's three dispositions
   continuity.py   staleness keying: which workstreams a document
                   that arrived mid-case speaks to, scored in code
   governance.py   source governance: the registry and its corpus
