@@ -75,6 +75,8 @@
     <div id="cases"></div>
     <h2>Analyst workbench</h2>
     <div id="workbench"><p class="muted">Loading…</p></div>
+    <h2>Portfolios</h2>
+    <div id="portfolios"><p class="muted">Loading…</p></div>
     <h2>Interrupted cases</h2>
     <div id="interrupted"><p class="muted">None.</p></div>
     <h2>Harness profile gate</h2>
@@ -96,6 +98,7 @@
 <script>
 const $ = (sel) => document.querySelector(sel);
 let samples = [], current = null;
+let engagementsById = {};
 
 function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 function md(text) {
@@ -119,15 +122,18 @@ async function api(path, options) {
   return res.json();
 }
 async function refreshCases() {
+  const engagements = await api("/api/engagements").catch(() => []);
+  engagementsById = Object.fromEntries(engagements.map(e => [e.engagement_id, e]));
   const cases = await api("/api/cases");
   $("#cases").innerHTML = cases.map(c => `
     <div class="case-card ${current === c.case_id ? "active" : ""}" data-case="${c.case_id}">
       <div class="name">${esc(c.subject)}</div>
-      <div class="meta">${esc(c.case_id)} · <span class="status">${esc(c.status)}</span>${c.priority && c.priority !== "normal" ? ` · <strong>${esc(c.priority)}</strong>` : ""}${c.assignee ? ` · ${esc(c.assignee)}` : ""}</div>
+      <div class="meta">${esc(c.case_id)} · <span class="status">${esc(c.status)}</span>${c.priority && c.priority !== "normal" ? ` · <strong>${esc(c.priority)}</strong>` : ""}${c.assignee ? ` · ${esc(c.assignee)}` : ""}${c.engagement_id && engagementsById[c.engagement_id] ? ` · ${esc(engagementsById[c.engagement_id].name)}` : ""}</div>
     </div>`).join("") || '<p class="muted">No cases yet.</p>';
   document.querySelectorAll(".case-card").forEach(el => el.addEventListener("click", () => openCase(el.dataset.case)));
   await refreshInterrupted();
   await refreshWorkbench();
+  await refreshPortfolios();
 }
 async function refreshInterrupted() {
   const box = $("#interrupted");
@@ -261,6 +267,100 @@ async function refreshWorkbench() {
     box.innerHTML = `<p class="muted">Workbench unavailable: ${esc(e.message)}</p>`;
   }
 }
+async function refreshPortfolios() {
+  const box = $("#portfolios");
+  if (!box) return;
+  try {
+    const summaries = await api("/api/portfolio");
+    box.innerHTML = `
+      <p class="muted" style="margin:4px 0">Engagements group cases under one client mandate. The portfolio view folds from the member cases' own records — gates, evidence, budgets, and retention stay per case; there is no portfolio-level decision.</p>
+      ${summaries.length ? summaries.map(s => `
+        <div class="case-card" data-engagement="${esc(s.engagement_id)}">
+          <div class="name">${esc(s.name)}</div>
+          <div class="meta">${esc(s.client)} · owner ${esc(s.owner)} · ${s.total_cases} case(s) — ${Object.entries(s.counts_by_status).filter(([, n]) => n).map(([k, n]) => `${n} ${esc(k)}`).join(", ") || "none yet"}<br>${s.gates_open} gate(s) open${s.oldest_waiting_since ? ` · oldest waits since ${esc(s.oldest_waiting_since.slice(0, 10))}` : ""} · recorded cost $${Number(s.cost_usd || 0).toFixed(6)}${s.legal_hold_cases ? ` · <strong style="color:#B42318">${s.legal_hold_cases} under legal hold</strong>` : ""}${s.past_retention_cases ? ` · ${s.past_retention_cases} past retention` : ""}</div>
+        </div>`).join("") : '<p class="muted">No engagements yet.</p>'}
+      <div style="margin-top:10px">
+        <input id="eng-name" type="text" placeholder="Engagement name" style="width:100%;margin-bottom:5px">
+        <input id="eng-client" type="text" placeholder="Client label" style="width:100%;margin-bottom:5px">
+        <input id="eng-owner" type="text" placeholder="Owner (desk member)" style="width:100%">
+        <button class="wide" id="eng-create">Create engagement</button>
+      </div>
+    `;
+    box.querySelectorAll("[data-engagement]").forEach(el => el.addEventListener("click", () => openPortfolio(el.dataset.engagement)));
+    const create = $("#eng-create");
+    if (create) create.addEventListener("click", async () => {
+      const name = $("#eng-name").value.trim(), client = $("#eng-client").value.trim(), owner = $("#eng-owner").value.trim();
+      if (!name || !client || !owner) { alert("An engagement needs a name, a client label, and an owner."); return; }
+      create.disabled = true;
+      try {
+        await api("/api/engagements", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({analyst: "Console Analyst", name, client, owner})});
+      } catch (e) { alert(e.message); }
+      await refreshCases();
+    });
+  } catch (e) {
+    box.innerHTML = `<p class="muted">Portfolios unavailable: ${esc(e.message)}</p>`;
+  }
+}
+async function openPortfolio(engagementId) {
+  current = null;
+  const r = await api(`/api/portfolio/${engagementId}`);
+  const e = r.engagement;
+  $("#detail").innerHTML = `
+    <div style="display:flex;align-items:baseline;gap:12px">
+      <h2 style="font-size:20px;color:var(--ink);letter-spacing:0;text-transform:none;margin:0">${esc(e.name)}</h2>
+      <span class="muted">${esc(e.engagement_id)} · ${esc(e.client)} · owner ${esc(e.owner)} · created by ${esc(e.created_by)}</span>
+    </div>
+    <p class="muted">Folded from the member cases' records on this read — nothing here is stored, and nothing here decides anything: every gate below is taken on its own case.</p>
+    <div class="grid">
+      <div class="panel"><h3>Cases (${r.total_cases})</h3>
+        ${r.cases.length ? r.cases.map(row => `
+          <div class="case-card" data-case="${esc(row.case_id)}">
+            <div class="name">${esc(row.subject)}</div>
+            <div class="meta">${esc(row.case_id)} · <span class="status">${esc(row.status)}</span>${row.assignee ? ` · ${esc(row.assignee)}` : ""}${row.priority !== "normal" ? ` · <strong>${esc(row.priority)}</strong>` : ""}
+            ${row.grades ? `<br>grades: ${row.grades.map(g => `${esc(g.question_id)} ${esc(g.grade)}`).join(" · ")}` : "<br>no report yet"}
+            <br>recorded cost $${Number(row.cost.cost_usd || 0).toFixed(6)} · ${row.cost.total_tokens} tokens
+            ${row.flags.length ? `<br><strong style="color:#B42318">${row.flags.map(f => esc(f.replace("_", " "))).join(", ")}</strong> — retention is a per-case act; the portfolio only surfaces it` : ""}
+            ${row.open_conflicts.length ? `<br>open conflicts: ${row.open_conflicts.map(esc).join(", ")}` : ""}${row.open_quarantine.length ? `<br>quarantined claims awaiting disposition: ${row.open_quarantine.map(esc).join(", ")}` : ""}</div>
+          </div>`).join("") : '<p class="muted">No cases in this engagement yet — assign one from its case page.</p>'}
+        <h3 style="margin-top:14px">Search this engagement</h3>
+        <div class="row" style="margin:0 0 6px">
+          <input id="pf-q" type="text" placeholder="Subjects, questions, findings — members only" style="flex:1">
+          <button class="secondary" id="pf-search">Search</button>
+        </div>
+        <div id="pf-results"></div>
+      </div>
+      <div class="panel"><h3>Gates awaiting decision (${r.gates.count})</h3>
+        ${r.gates.items.length ? r.gates.items.map(i => `
+          <div class="case-card" data-case="${esc(i.case_id)}">
+            <div class="name">${esc(i.subject)}</div>
+            <div class="meta"><strong>${esc(i.label)}</strong> — ${esc(i.detail)}<br>waiting ${fmtAge(i.age_seconds)} · ${esc(i.priority)}${i.assignee ? ` · ${esc(i.assignee)}` : " · unassigned"}</div>
+          </div>`).join("") : '<p class="muted">Nothing in this portfolio is waiting on an analyst.</p>'}
+        <h3 style="margin-top:14px">Open items across the portfolio</h3>
+        ${r.open_conflicts.length ? `<div class="muted">Conflicts not yet noted</div>` + r.open_conflicts.map(cf => `<div class="finding"><strong>${esc(cf.conflict_id)}</strong> · ${esc(cf.subject)} (${esc(cf.case_id)}) — ${esc(cf.key.metric)} · ${esc(cf.key.period || "no period")}</div>`).join("") : ""}
+        ${r.open_quarantine.length ? `<div class="muted" style="margin-top:8px">Quarantined claims awaiting disposition</div>` + r.open_quarantine.map(q => `<div class="finding"><strong>${esc(q.quarantine_id)}</strong> · ${esc(q.subject)} (${esc(q.case_id)}) — claim ${esc(q.claim_id)}, ${esc(q.reason)}</div>`).join("") : ""}
+        ${!r.open_conflicts.length && !r.open_quarantine.length ? '<p class="muted">No open conflicts or quarantined claims in this portfolio.</p>' : ""}
+        <h3 style="margin-top:14px">Cost roll-up</h3>
+        <div class="finding">Total recorded cost: <strong>$${Number(r.cost.totals.cost_usd || 0).toFixed(6)}</strong> — ${r.cost.totals.calls} model call(s), ${r.cost.totals.total_tokens} tokens across ${r.cost.totals.cases} case(s)${r.cost.contains_estimates ? " · includes estimated (offline) figures" : ""}.</div>
+        <div class="muted">Summed from each case's own cost ledger — the per-case figures stand at each case's own cost report, and budgets were never merged: each case ran under its own caps.</div>
+      </div>
+    </div>`;
+  document.querySelectorAll("#detail .case-card").forEach(el => el.addEventListener("click", () => openCase(el.dataset.case)));
+  const searchBtn = $("#pf-search");
+  if (searchBtn) searchBtn.addEventListener("click", async () => {
+    const q = $("#pf-q").value.trim();
+    const target = $("#pf-results");
+    if (!q) { target.innerHTML = ""; return; }
+    try {
+      const hits = await api(`/api/workbench/search?q=${encodeURIComponent(q)}&engagement_id=${encodeURIComponent(engagementId)}`);
+      target.innerHTML = hits.length ? hits.map(h => `
+        <div class="case-card" data-case="${esc(h.case_id)}">
+          <div class="name">${esc(h.subject)}</div>
+          ${h.matches.map(m => `<div class="meta"><strong>${esc(m.field)}</strong>${m.ref && m.ref !== h.case_id ? ` ${esc(m.ref)}` : ""}: ${esc(m.text)}</div>`).join("")}
+        </div>`).join("") : '<p class="muted">No member case mentions that.</p>';
+      target.querySelectorAll(".case-card").forEach(el => el.addEventListener("click", () => openCase(el.dataset.case)));
+    } catch (err) { target.innerHTML = `<p class="muted">${esc(err.message)}</p>`; }
+  });
+}
 function bar(label, used, cap) {
   const pct = cap ? Math.min(100, Math.round(100 * (used || 0) / cap)) : 0;
   return `<div style="margin:6px 0"><div class="muted">${label}: ${used || 0} / ${cap}</div><div class="bar"><div style="width:${pct}%"></div></div></div>`;
@@ -330,6 +430,14 @@ async function openCase(caseId) {
         ${["normal", "high", "urgent"].map(p => `<option value="${p}" ${c.priority === p ? "selected" : ""}>${p}</option>`).join("")}
       </select>
       <button id="act-triage" class="secondary">Save triage</button>
+    </div>
+    <div class="row" style="align-items:center">
+      <span class="muted">Engagement — the client mandate this case runs under. Membership is organisational only: it scopes the portfolio view and search, and changes nothing inside the case:</span>
+      <select id="eng-select" style="width:auto;min-width:200px">
+        <option value="">No engagement</option>
+        ${Object.values(engagementsById).map(e => `<option value="${esc(e.engagement_id)}" ${c.engagement_id === e.engagement_id ? "selected" : ""}>${esc(e.name)} — ${esc(e.client)}</option>`).join("")}
+      </select>
+      <button id="act-engagement" class="secondary">Save engagement</button>
     </div>
     <div class="grid">
       <div class="panel"><h3>Brief</h3>
@@ -520,6 +628,14 @@ async function openCase(caseId) {
     try {
       await api(`/api/cases/${caseId}/assignment`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({analyst: "Console Analyst", assignee: $("#triage-assignee").value.trim()})});
       await api(`/api/cases/${caseId}/priority`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({analyst: "Console Analyst", priority: $("#triage-priority").value})});
+    } catch (e) { alert(e.message); }
+    await refreshCases(); await openCase(caseId);
+  });
+  const engBtn = $("#act-engagement");
+  if (engBtn) engBtn.addEventListener("click", async () => {
+    engBtn.disabled = true;
+    try {
+      await api(`/api/cases/${caseId}/engagement`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({analyst: "Console Analyst", engagement_id: $("#eng-select").value || null})});
     } catch (e) { alert(e.message); }
     await refreshCases(); await openCase(caseId);
   });
