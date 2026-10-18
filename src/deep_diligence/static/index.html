@@ -376,7 +376,7 @@ async function openCase(caseId) {
       ${bar("Steps", phase.consumed.steps, phase.granted.max_steps)}
       ${bar("Tokens", phase.consumed.tokens, phase.granted.max_tokens)}`;
   };
-  const [plan, findings, evidence, audit, timeline, report, ledger, verification, quarantine, conflicts, workstreams, checkpoint, notes, versions, provenance, caseSources, redactionData, sectionNotes, costReport] = await Promise.all([
+  const [plan, findings, evidence, audit, timeline, report, ledger, verification, quarantine, conflicts, challenges, workstreams, checkpoint, notes, versions, provenance, caseSources, redactionData, sectionNotes, costReport] = await Promise.all([
     api(`/api/cases/${caseId}/plan`).catch(() => null),
     api(`/api/cases/${caseId}/findings`),
     api(`/api/cases/${caseId}/evidence`),
@@ -387,6 +387,7 @@ async function openCase(caseId) {
     api(`/api/cases/${caseId}/verification`).catch(() => null),
     api(`/api/cases/${caseId}/quarantine`).catch(() => []),
     api(`/api/cases/${caseId}/conflicts`).catch(() => []),
+    api(`/api/cases/${caseId}/challenges`).catch(() => []),
     api(`/api/cases/${caseId}/workstreams`).catch(() => []),
     api(`/api/cases/${caseId}/checkpoint`).catch(() => null),
     api(`/api/cases/${caseId}/notes`).catch(() => []),
@@ -546,6 +547,35 @@ async function openCase(caseId) {
           </div>` : ""}
         </div>`).join("") : '<p class="muted">No conflicts. A conflict appears when two supported findings disagree on the same metric for the same period; corroboration — the same value from two sources — is not a conflict.</p>'}
     </div>
+    ${(() => { const openCh = challenges.filter(x => x.status === "OPEN"); const openMust = openCh.filter(x => x.severity === "must_answer").length; const openAdv = openCh.length - openMust; const chDetail = x => {
+        const d = x.detail || {};
+        if (x.rule === "single_source_figure") return `${(d.assertions || []).map(a => `${esc(a.metric)}${a.period ? " " + esc(a.period) : ""}: ${esc(a.value_text)}`).join("; ")} — rests on a single ${esc(d.evidence.source_class || "")} source, ${esc(d.evidence.source || d.evidence.evidence_id || "")} (${esc(d.evidence.doc_date || "")}), with no corroborating claim`;
+        if (x.rule === "oldest_source_on_contested_metric") return `conflict ${esc(d.conflict_id)} · ${esc(d.metric)} — this claim's evidence includes the oldest document on the contested metric (${esc(d.oldest_doc_date)}); another side rests on fresher evidence (${esc(d.freshest_side_date)})`;
+        if (x.rule === "grade_rests_on_one_document") return `the question's grade ${esc(d.grade)} rests on one document across ${(d.claim_ids || []).length} claim(s)`;
+        if (x.rule === "one_document_carries_questions") return `one document is the sole evidence behind questions ${(d.question_ids || []).map(esc).join(", ")}`;
+        return "";
+      }; return `
+    <div class="panel" style="margin-top:16px"><h3>Challenge pass (${openMust} must-answer open · ${openAdv} advisory open · ${challenges.length} on record)</h3>
+      <p class="muted" style="margin-top:0">The desk's second opinion, computed in code from the verified draft's records — the claims, their evidence, the conflicts, the grades. Challenges are internal review: they are never part of the delivered report. A report with an unanswered <strong>must-answer</strong> challenge cannot be approved; advisory challenges are counted here and never block. An answered challenge whose target a later draft leaves behind is marked SUPERSEDED, never deleted.</p>
+      ${challenges.length ? challenges.map(x => `
+        <div class="finding">
+          <strong>${esc(x.challenge_id)} — ${esc(x.rule)}</strong> · ${x.severity === "must_answer" ? '<span style="color:#B42318;font-weight:700">MUST-ANSWER</span>' : '<span class="muted">advisory</span>'} · <span class="status">${esc(x.status)}</span><br>
+          ${x.claim ? `${esc(x.claim_id)}: ${esc(x.claim)} ${x.evidence_ids.map(e => `<a class="ev" data-ev="${e}">[${e}]</a>`).join(" ")}<br>` : ""}
+          ${!x.claim && x.question_id ? `Question ${esc(x.question_id)} ${x.evidence_ids.map(e => `<a class="ev" data-ev="${e}">[${e}]</a>`).join(" ")}<br>` : ""}
+          ${!x.claim && !x.question_id ? `${x.evidence_ids.map(e => `<a class="ev" data-ev="${e}">[${e}]</a>`).join(" ")}<br>` : ""}
+          <div class="muted">${chDetail(x)}</div>
+          ${(x.answers || []).map(a => `<div class="muted">${esc(a.disposition)} by ${esc(a.analyst)}${a.note ? " — " + esc(a.note) : ""}${a.counter_evidence_ids && a.counter_evidence_ids.length ? " · counter-evidence: " + a.counter_evidence_ids.map(e => esc(e)).join(", ") : ""}${a.quarantine_id ? " · quarantine " + esc(a.quarantine_id) : ""}</div>`).join("")}
+          ${x.status === "OPEN" ? `<div class="row">
+            <input id="chnote-${esc(x.challenge_id)}" type="text" placeholder="Answer (a rebuttal must say why the claim stands)" style="flex:1">
+            <input id="chev-${esc(x.challenge_id)}" type="text" placeholder="Counter-evidence IDs, e.g. EV-0001" style="min-width:190px">
+          </div>
+          <div class="row">
+            <button class="secondary" data-chrebut="${esc(x.challenge_id)}" ${canDecideReport ? "" : "disabled"}>Rebut</button>
+            ${x.claim_id ? `<button class="secondary" data-chrevise="${esc(x.challenge_id)}" ${canDecideReport ? "" : "disabled"}>Send claim back</button>
+            <button class="danger" data-chdowngrade="${esc(x.challenge_id)}" ${canDecideReport ? "" : "disabled"}>Downgrade claim</button>` : ""}
+          </div>` : ""}
+        </div>`).join("") : '<p class="muted">No challenges. The pass examines every verified draft; a draft whose figures are corroborated, whose contested claims rest on the fresher side, and whose grades spread across documents raises none.</p>'}
+    </div>`; })()}
     <div class="panel" style="margin-top:16px"><h3>Source governance — provenance, retention, redaction</h3>
       ${caseSources ? `<div class="muted">Sources this case runs on</div>
         ${caseSources.used.map(s => s ? `<div class="finding"><strong>${esc(s.name)}</strong> — ${esc(s.kind)} · ${esc(s.usage_basis)} · owner: ${esc(s.owner)}</div>` : "").join("")}
@@ -736,6 +766,29 @@ async function openCase(caseId) {
     } catch (e) { alert(e.message); }
     await refreshCases(); await openCase(caseId);
   });
+  const chPost = async (id, payload) => {
+    try {
+      await api(`/api/cases/${caseId}/challenges/${id}/decision`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload)});
+    } catch (e) { alert(e.message); }
+    await refreshCases(); await openCase(caseId);
+  };
+  document.querySelectorAll("[data-chrebut]").forEach(el => el.addEventListener("click", async () => {
+    const id = el.dataset.chrebut;
+    const note = ((document.getElementById(`chnote-${id}`) || {}).value || "").trim();
+    const counter = (((document.getElementById(`chev-${id}`) || {}).value || "").split(/[\s,]+/).filter(Boolean));
+    if (!note) { alert("A rebuttal must say why the claim stands."); return; }
+    if (!counter.length) { alert("A rebuttal must name counter-evidence from the case — enter at least one evidence ID."); return; }
+    el.disabled = true;
+    await chPost(id, {analyst: "Console Analyst", action: "rebut", note, counter_evidence_ids: counter});
+  }));
+  const chAct = (attr, action) => document.querySelectorAll(`[data-${attr}]`).forEach(el => el.addEventListener("click", async () => {
+    const id = el.dataset[attr];
+    const note = ((document.getElementById(`chnote-${id}`) || {}).value || "").trim();
+    el.disabled = true;
+    await chPost(id, {analyst: "Console Analyst", action, note: note || (action === "revise" ? "Sent back from the console" : "Downgraded from the console")});
+  }));
+  chAct("chrevise", "revise");
+  chAct("chdowngrade", "downgrade");
   document.querySelectorAll("[data-cnote]").forEach(el => el.addEventListener("click", async () => {
     const input = document.getElementById(`cnote-${el.dataset.cnote}`);
     const note = input ? input.value.trim() : "";

@@ -24,6 +24,7 @@ from .models import (
     BriefIn,
     BudgetAmendIn,
     CaseOut,
+    ChallengeDecisionIn,
     ConflictNoteIn,
     DecisionIn,
     DeleteCaseIn,
@@ -356,6 +357,39 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         case = service.store.get_case(case_id)
         return {"conflict": record, "case_status": case["status"]}
+
+    @app.get("/api/cases/{case_id}/challenges")
+    def list_challenges(case_id: str) -> list[dict]:
+        get_case_or_404(case_id)
+        return service.store.list_challenges(case_id)
+
+    @app.post(
+        "/api/cases/{case_id}/challenges/{challenge_id}/decision",
+        dependencies=[Depends(require_api_key)],
+    )
+    def decide_challenge(
+        case_id: str, challenge_id: str, decision: ChallengeDecisionIn
+    ) -> dict:
+        get_case_or_404(case_id)
+        try:
+            record = service.decide_challenge(
+                case_id,
+                challenge_id,
+                decision.analyst,
+                decision.action,
+                decision.note,
+                decision.counter_evidence_ids,
+            )
+        except KeyError:
+            raise HTTPException(
+                status_code=404, detail="challenge record not found"
+            ) from None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except GateError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        case = service.store.get_case(case_id)
+        return {"challenge": record, "case_status": case["status"]}
 
     @app.post("/api/cases/{case_id}/report/decision", dependencies=[Depends(require_api_key)])
     def decide_report(case_id: str, decision: DecisionIn) -> dict:

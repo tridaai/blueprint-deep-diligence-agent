@@ -101,6 +101,19 @@ class QuarantineDecisionIn(BaseModel):
     note: str = Field(default="", max_length=2000)
 
 
+class ChallengeDecisionIn(BaseModel):
+    analyst: str = Field(min_length=1, max_length=120)
+    # A challenge has exactly three answers: rebut it in writing,
+    # send the claim back for re-investigation, or downgrade the
+    # claim out of the report's support. There is no dismiss or
+    # ignore action, by design.
+    action: Literal["rebut", "revise", "downgrade"]
+    note: str = Field(default="", max_length=2000)
+    # A rebuttal names its counter-evidence from the case; the
+    # service refuses IDs that are not evidence in this case.
+    counter_evidence_ids: list[str] = Field(default_factory=list, max_length=20)
+
+
 class EvidenceIn(BaseModel):
     """A document an analyst adds to a case mid-flight. It becomes
     case evidence under the same rules as the intake corpus; the
