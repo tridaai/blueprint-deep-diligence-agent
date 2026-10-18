@@ -1945,7 +1945,8 @@ class CaseService:
         ledger and adding the folds. Each case still owns its
         detail at its own cost report; this is the desk's total
         spend line and the per-case figures it is made of, nothing
-        more (portfolio comparison is a later round's work)."""
+        more. (The per-engagement roll-up is the portfolio fold's,
+        in portfolio.py.)"""
         cases: list[dict] = []
         total_cost = Decimal(0)
         total_tokens = 0
