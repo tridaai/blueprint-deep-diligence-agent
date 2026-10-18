@@ -87,6 +87,23 @@ reads the mounted files as its playbook step, but it cannot
 follow prose method, so no outcome difference is claimed for
 the method text itself.
 
+The observability pack (run_observability_cases) grades the
+reader side: a gold case's trace must cover every audit entry in
+causal order, fold its runs and priced cost from the budget and
+cost ledgers, and classify completed once approved; the
+budget-tight case must trace to its partial-report outcome with
+its class and uncovered questions named; the challenge pack's
+crafted case must classify challenge_blocked with its open
+must-answer challenges named; the day's digest must fold to the
+totals recomputed from the cases' own ledgers (cost included),
+store as version 1, and keep its figures after a second
+generation adds a case. A sweep classifies every case the other
+packs produce — gold, integrity with its poisoned findings,
+both dependency packs, the clean challenge case, the red-team
+case, a rejected plan, a fresh intake — and asserts the
+taxonomy is total: every outcome is one of the documented
+labels, and no terminal case hides in the in-progress fallback.
+
 Exit code 0 only when every gate passes for every case.
 
 Profiles: `--profile <id>` runs the same packs under a different
@@ -1078,6 +1095,294 @@ def run_skills_cases(profile_id: str = DEFAULT_PROFILE) -> dict:
     }
 
 
+def run_observability_cases(profile_id: str = DEFAULT_PROFILE) -> dict:
+    """The observability pack: the run trace, the failure
+    taxonomy, and the operations digest graded end to end.
+
+    In one store: the Helvion gold case runs to FINAL, the
+    budget-tight variant stops at BUDGET_EXHAUSTED, and Kestrel
+    (the challenge pack's crafted case) stands at its report
+    gate with must-answer challenges open. The trace must cover
+    every recorded act in causal order and fold its runs and
+    cost from the ledgers; the taxonomy must classify the three
+    cases completed / budget_exhausted / challenge_blocked, with
+    the deciding records named; the day's digest must fold to
+    the totals recomputed from those same ledgers, store as
+    version 1, and keep saying what it said after a second
+    generation. A sweep in a second store then classifies every
+    case the other packs produce — the integrity case with its
+    poisoned findings, both dependency packs, the clean
+    challenge case, the red-team case, a rejected plan, a fresh
+    intake — and asserts totality: every classification is one
+    of the documented labels, and no case at a terminal state
+    hides in the in-progress fallback. The pack grades the
+    reader side, so it stands outside the promotion split, like
+    the budget and red-team packs."""
+    from decimal import Decimal
+
+    from deep_diligence.corpus import RED_TEAM_CASES
+    from deep_diligence.observability import OUTCOME_LABELS
+    from deep_diligence.store import utcnow
+
+    checks: list[dict] = []
+
+    def check(name: str, ok: bool, detail: str = "") -> None:
+        checks.append({"name": name, "ok": bool(ok), "detail": detail})
+
+    def fresh_service(prefix: str) -> CaseService:
+        scratch = Path(tempfile.mkdtemp(prefix=prefix))
+        settings = load_settings(
+            sqlite_path=str(scratch / "diligence.db"),
+            object_dir=str(scratch / "objects"),
+            migrations_dir=str(REPO_ROOT / "migrations"),
+            profile_id=profile_id,
+        )
+        return CaseService(settings)
+
+    def full_run(service: CaseService, gold: dict, inject=()) -> str:
+        case = service.create_case(BriefIn(**gold["brief"]))
+        case_id = case["case_id"]
+        service.run_planning(case_id)
+        service.decide_plan(case_id, analyst="Eval Harness", approve=True)
+        if inject:
+            by_slug = {
+                ev["doc_slug"]: ev["evidence_id"]
+                for ev in service.store.list_evidence(case_id)
+            }
+            for item in inject:
+                service.store.add_finding_auto_id(
+                    case_id,
+                    {
+                        "question_id": item["question_id"],
+                        "claim": item["claim"],
+                        "evidence_ids": [by_slug[item["doc_slug"]]],
+                        "fact_ref": None,
+                    },
+                )
+        service.run_execution(case_id)
+        return case_id
+
+    day = utcnow()[:10]
+    service = fresh_service("deep-diligence-eval-obs-")
+
+    # -- the gold trace ---------------------------------------------------
+    gold = GOLD_CASES[0]
+    final_id = full_run(service, gold)
+    trace = service.case_trace(final_id)
+    audit = service.store.list_audit(final_id)
+    check(
+        "trace-covers-every-recorded-act",
+        [a["event"] for a in trace["acts"]] == [e["event"] for e in audit]
+        and [a["seq"] for a in trace["acts"]] == list(range(len(audit))),
+        f"{len(trace['acts'])} acts for {len(audit)} audit entries",
+    )
+    events = [a["event"] for a in trace["acts"]]
+    sequence = [
+        "case_created",
+        "plan_generated",
+        "plan_approved",
+        "execution_started",
+        "workstream_finished",
+        "report_composed",
+        "verification_completed",
+    ]
+    positions = [events.index(name) for name in sequence]
+    check(
+        "trace-reconstructs-the-act-sequence-in-order",
+        positions == sorted(positions),
+        "intake -> plan -> gate -> execution -> composition -> "
+        "verification, in the trail's own order",
+    )
+    consumed = {
+        e["payload"]["phase"]: e["payload"]["usage"]
+        for e in audit
+        if e["event"] == "budget_consumed"
+    }
+    ledger_total = fold_cost_ledger(audit)["totals"]["cost_usd"]
+    check(
+        "trace-runs-and-cost-fold-from-the-ledgers",
+        [r["phase"] for r in trace["runs"]] == ["planning", "execution"]
+        and all(
+            r["consumed"] == consumed[r["phase"]] for r in trace["runs"]
+        )
+        and Decimal(trace["cost"]["total_usd"]) == ledger_total,
+        f"runs carry their grants and consumption; trace cost "
+        f"${trace['cost']['total_usd']} == the ledger's fold",
+    )
+    check(
+        "trace-timing-states-what-was-never-recorded",
+        trace["timing"]["per_act_durations_recorded"] is False
+        and all("duration" not in a for a in trace["acts"]),
+        "no per-act durations are shown, because none were recorded",
+    )
+    service.decide_report(final_id, analyst="Eval Harness", approve=True)
+    check(
+        "gold-case-classifies-completed",
+        service.case_outcome(final_id)["label"] == "completed",
+        "FINAL after the report gate approved",
+    )
+
+    # -- the budget-exhausted outcome ---------------------------------------
+    budget = {**gold["brief"]["budget"], "execution": {"max_steps": 6}}
+    case = service.create_case(BriefIn(**{**gold["brief"], "budget": budget}))
+    exhausted_id = case["case_id"]
+    service.run_planning(exhausted_id)
+    service.decide_plan(exhausted_id, analyst="Eval Harness", approve=True)
+    service.run_execution(exhausted_id)
+    outcome = service.case_outcome(exhausted_id)
+    report = service.store.get_report(exhausted_id)
+    uncovered = [
+        r["question_id"]
+        for r in report["coverage_detail"]
+        if r["status"] == "NOT COVERED"
+    ]
+    execution_run = next(
+        r for r in service.case_trace(exhausted_id)["runs"]
+        if r["phase"] == "execution"
+    )
+    check(
+        "budget-exhausted-case-traces-to-its-partial-outcome",
+        outcome["label"] == "budget_exhausted"
+        and outcome["detail"]["uncovered"] == uncovered
+        and uncovered
+        and execution_run["exceeded"]["kind"] == "steps"
+        and report["partial"] is True,
+        f"class budget_exhausted; uncovered {uncovered}; the "
+        "execution run's tripped cap rides its trace",
+    )
+
+    # -- the challenge-blocked outcome ---------------------------------------
+    blocked_id = full_run(service, CHALLENGE_CASES[0])
+    outcome = service.case_outcome(blocked_id)
+    must_open = [
+        c["challenge_id"]
+        for c in service.store.list_challenges(blocked_id)
+        if c["status"] == "OPEN" and c["severity"] == "must_answer"
+    ]
+    check(
+        "challenge-blocked-case-names-its-challenges",
+        outcome["label"] == "challenge_blocked"
+        and outcome["detail"]["challenge_ids"] == must_open
+        and len(must_open) == 2,
+        f"open must-answer: {must_open}",
+    )
+
+    # -- the digest ---------------------------------------------------------
+    record = service.generate_digest(day, "Eval Harness")
+    digest = record["digest"]
+    expected_cost = sum(
+        fold_cost_ledger(service.store.list_audit(cid))["totals"]["cost_usd"]
+        for cid in (final_id, exhausted_id, blocked_id)
+    )
+    check(
+        "digest-folds-the-day-to-the-ledgers-totals",
+        record["version"] == 1
+        and sorted(digest["cases"]["opened"])
+        == sorted([final_id, exhausted_id, blocked_id])
+        and digest["cases"]["closed"] == [final_id]
+        and digest["gate_decisions"]
+        == {
+            "plan_approved": 3,
+            "plan_rejected": 0,
+            "report_approved": 1,
+            "report_rejected": 0,
+        }
+        and Decimal(digest["cost"]["total_usd"]) == expected_cost
+        and digest["cost"]["runs_recorded"] == 6,
+        f"cost ${digest['cost']['total_usd']} recomputed from the "
+        "three cases' ledgers; gates and closures as recorded",
+    )
+    check(
+        "digest-taxonomy-and-partials-describe-the-day",
+        digest["taxonomy"]
+        == {
+            "budget_exhausted": 1,
+            "challenge_blocked": 1,
+            "completed": 1,
+        }
+        and [p["case_id"] for p in digest["partial_reports"]]
+        == [exhausted_id]
+        and digest["partial_reports"][0]["uncovered"] == uncovered
+        and {
+            c["challenge_id"]
+            for c in digest["challenges"]["open_must_answer"]
+        }
+        == set(must_open),
+        "one label per opened case; the standing partial names "
+        "its uncovered questions; the open must-answer list is "
+        "the crafted case's two",
+    )
+    extra = service.create_case(BriefIn(**GOLD_CASES[1]["brief"]))
+    second = service.generate_digest(day, "Eval Harness")
+    stored = service.list_digests()
+    check(
+        "digest-versions-stack-and-snapshots-do-not-move",
+        second["version"] == 2
+        and second["digest"]["cases"]["opened_count"] == 4
+        and stored[0]["version"] == 1
+        and stored[0]["digest"]["cases"]["opened_count"] == 3
+        and service.get_digest("1999-01-01") is None,
+        "regeneration mints v2 over 4 cases; v1 still says 3; an "
+        "ungenerated day reads as absent",
+    )
+
+    # -- the totality sweep ---------------------------------------------------
+    sweep = fresh_service("deep-diligence-eval-obs-sweep-")
+    outcomes: dict[str, tuple[str, str]] = {}
+
+    def classify(service_: CaseService, case_id: str) -> None:
+        case_ = service_.store.get_case(case_id)
+        try:
+            label = service_.case_outcome(case_id)["label"]
+        except Exception as exc:  # totality: a raise is a failure
+            label = f"RAISED {type(exc).__name__}: {exc}"
+        outcomes[f"{case_id}@{case_['status']}"] = (case_["status"], label)
+
+    fresh = sweep.create_case(BriefIn(**GOLD_CASES[2]["brief"]))
+    classify(sweep, fresh["case_id"])
+    rejected = sweep.create_case(BriefIn(**GOLD_CASES[1]["brief"]))
+    sweep.run_planning(rejected["case_id"])
+    sweep.decide_plan(rejected["case_id"], analyst="Eval Harness", approve=False)
+    classify(sweep, rejected["case_id"])
+    integrity_id = full_run(
+        sweep, INTEGRITY_CASES[0], inject=INTEGRITY_CASES[0]["poisoned_findings"]
+    )
+    classify(sweep, integrity_id)
+    sweep.decide_report(integrity_id, analyst="Eval Harness", approve=True)
+    classify(sweep, integrity_id)
+    for gold_dep in DEPENDENCY_CASES:
+        classify(sweep, full_run(sweep, gold_dep))
+    classify(sweep, full_run(sweep, CHALLENGE_CASES[1]))
+    red = RED_TEAM_CASES[0]
+    classify(sweep, full_run(sweep, red, inject=red["injected_findings"]))
+    unclassified = {
+        cid: outcome
+        for cid, outcome in outcomes.items()
+        if outcome[1] not in OUTCOME_LABELS
+    }
+    terminal_hidden = {
+        cid: outcome
+        for cid, outcome in outcomes.items()
+        if outcome[0]
+        in ("FINAL", "BUDGET_EXHAUSTED", "PLAN_REJECTED", "REPORT_REJECTED")
+        and outcome[1] == "in_progress"
+    }
+    check(
+        "taxonomy-is-total-over-the-pack-outcomes",
+        not unclassified and not terminal_hidden and len(outcomes) >= 8,
+        f"{len(outcomes)} case-states classified: "
+        + ", ".join(
+            f"{status}->{label}"
+            for status, label in sorted(outcomes.values())
+        ),
+    )
+    return {
+        "key": "observability",
+        "checks": checks,
+        "ok": all(c["ok"] for c in checks),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Gold case-pack gate for the Deep Diligence Agent."
@@ -1381,6 +1686,29 @@ def main(argv: list[str] | None = None) -> int:
             f"  skills check {skills_check['name']}: "
             f"{'OK' if skills_check['ok'] else 'FAILED'}"
             f" — {skills_check['detail']}"
+        )
+    # Observability pack: the run trace, the failure taxonomy,
+    # and the operations digest graded on the records themselves
+    # — the trace reconstructs a gold run act for act, the
+    # taxonomy names the completed / budget-exhausted /
+    # challenge-blocked outcomes and stays total over the other
+    # packs' cases, and the digest folds a day to the ledgers'
+    # own totals and stores its snapshots versioned. Outside
+    # the promotion split, like the budget and red-team packs.
+    observability_result = run_observability_cases(profile_id=args.profile)
+    all_pass = all_pass and observability_result["ok"]
+    print(
+        f"{observability_result['key']}: the trace reconstructs "
+        f"the gold run act for act, the taxonomy names its "
+        f"outcomes and stays total over the packs' cases, the "
+        f"digest folds the day to the ledgers' totals "
+        f"-> {'PASS' if observability_result['ok'] else 'FAIL'}"
+    )
+    for obs_check in observability_result["checks"]:
+        print(
+            f"  observability check {obs_check['name']}: "
+            f"{'OK' if obs_check['ok'] else 'FAILED'}"
+            f" — {obs_check['detail']}"
         )
     print(
         f"unsupported claims in final reports across all packs: "
