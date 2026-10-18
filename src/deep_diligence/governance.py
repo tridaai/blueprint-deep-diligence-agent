@@ -72,6 +72,16 @@ _CORPUS_SOURCE_SEED: dict[str, tuple[str, str, str, str]] = {
         "filing", "Subject company (issuer)", "public",
         "The subject's letter to its investors.",
     ),
+    "Company investor presentation": (
+        "filing", "Subject company (issuer)", "public",
+        "The subject's results presentation to investors; its "
+        "tables restate the filing, its commentary is the "
+        "company's own framing.",
+    ),
+    "Company investor relations release": (
+        "news", "Subject company (issuer)", "public",
+        "A release from the subject's investor-relations office.",
+    ),
     "Vendor product documentation": (
         "web", "Subject company (vendor)", "public",
         "The vendor's published product documentation.",
