@@ -39,7 +39,7 @@ def main() -> None:
     service.decide_report(case_id, analyst="Demo Analyst", approve=True)
     case = service.store.get_case(case_id)
     print(f"Report approved. Final case status: {case['status']}\n")
-    print(report["markdown"])
+    print(service.store.get_report(case_id)["markdown"])
     print(f"(scratch data in {scratch})")
 
 

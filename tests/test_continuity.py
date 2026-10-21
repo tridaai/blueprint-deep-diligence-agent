@@ -311,6 +311,20 @@ def test_stale_marks_block_execution_until_decided(
         service.run_execution(executed_case)
 
 
+def test_stale_marks_block_report_approval_until_decided(
+    service: CaseService, executed_case: str
+):
+    # Evidence arriving while the draft is at the report gate must
+    # be decided before the draft can become final.
+    _add_roaming_doc(service, executed_case)
+    with pytest.raises(GateError, match="stale"):
+        service.decide_report(executed_case, "Desk Lead", True)
+    assert service.store.get_case(executed_case)["status"] == "DRAFT_READY"
+    service.decide_staleness(executed_case, "Desk Lead", "proceed", "noted")
+    final = service.decide_report(executed_case, "Desk Lead", True)
+    assert final["status"] == "FINAL"
+
+
 def test_proceed_records_the_staleness_in_the_report_limits(
     service: CaseService, executed_case: str
 ):

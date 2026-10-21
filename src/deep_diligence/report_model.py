@@ -71,6 +71,16 @@ NAMED_SECTIONS: tuple[tuple[str, str], ...] = (
 
 GRADES = ("STRONG", "STANDARD", "THIN", "UNANSWERED")
 
+# The status line every format of the report opens with. A draft
+# carries DRAFT_STATUS_LINE; the report gate swaps it for the
+# final_status_line when an analyst approves, so an approved
+# report never reads as a draft (service.decide_report).
+DRAFT_STATUS_LINE = "Status: DRAFT — not final until an analyst approves it."
+
+
+def final_status_line(analyst: str, day: str) -> str:
+    return f"Status: FINAL — approved by {analyst} on {day}."
+
 
 def question_grade(
     claims: list[dict],
@@ -533,7 +543,7 @@ def render_html(model: dict) -> str:
         f"<title>Diligence report — {_esc(model['subject'])}</title>",
         f"<style>{_HTML_STYLE}</style></head><body>",
         f"<h1>Diligence report — {_esc(model['subject'])}</h1>",
-        "<p>Status: DRAFT — not final until an analyst approves it.<br>",
+        f"<p>{_esc(DRAFT_STATUS_LINE)}<br>",
         f"Commissioned by: {_esc(model['commissioned_by'])}. "
         f"Evidence in scope: {model['evidence_count']} documents.</p>",
     ]

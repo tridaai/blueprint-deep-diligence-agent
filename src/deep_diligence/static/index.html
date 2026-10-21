@@ -380,7 +380,7 @@ async function openCase(caseId) {
       ${bar("Steps", phase.consumed.steps, phase.granted.max_steps)}
       ${bar("Tokens", phase.consumed.tokens, phase.granted.max_tokens)}`;
   };
-  const [plan, findings, evidence, audit, timeline, report, ledger, verification, quarantine, conflicts, challenges, workstreams, checkpoint, notes, versions, provenance, caseSources, redactionData, sectionNotes, costReport, trace] = await Promise.all([
+  const [plan, findings, evidence, audit, timeline, report, ledger, verification, quarantine, conflicts, challenges, workstreams, checkpoint, notes, versions, provenance, caseSources, redactionData, sectionNotes, costReport, trace, registry] = await Promise.all([
     api(`/api/cases/${caseId}/plan`).catch(() => null),
     api(`/api/cases/${caseId}/findings`),
     api(`/api/cases/${caseId}/evidence`),
@@ -402,6 +402,7 @@ async function openCase(caseId) {
     api(`/api/cases/${caseId}/report/notes`).catch(() => []),
     api(`/api/cases/${caseId}/cost`).catch(() => null),
     api(`/api/cases/${caseId}/trace`).catch(() => null),
+    api(`/api/sources`).catch(() => []),
   ]);
   const driftIds = new Set(((ledger && ledger.verification && ledger.verification.drift) || []).map(d => d.evidence_id));
   const canPlan = ["INTAKE", "PLAN_REJECTED"].includes(c.status);
@@ -411,6 +412,11 @@ async function openCase(caseId) {
   const canResume = c.status === "EXECUTING";
   const canReplan = ["PLAN_READY", "APPROVED", "DRAFT_READY", "BUDGET_EXHAUSTED", "REPORT_REJECTED", "PLAN_REJECTED"].includes(c.status);
   const staleMarks = c.stale_marks || [];
+  // A planning run that stopped on its budget leaves the case in
+  // INTAKE / PLAN_REJECTED with no plan; the amendment is its way out.
+  const lastPlanningOutcome = [...audit].reverse().find(a => ["planning_budget_exceeded", "plan_generated", "budget_amended"].includes(a.event));
+  const planningStopped = canPlan && !!lastPlanningOutcome && lastPlanningOutcome.event === "planning_budget_exceeded";
+  const canAmend = c.status === "BUDGET_EXHAUSTED" || planningStopped;
   const byQuestion = {};
   findings.forEach(f => { (byQuestion[f.question_id] = byQuestion[f.question_id] || []).push(f); });
   $("#detail").innerHTML = `
@@ -460,9 +466,9 @@ async function openCase(caseId) {
         <div class="finding">Recorded cost: <strong>$${Number(costReport.cost.totals.cost_usd || 0).toFixed(6)}</strong> — ${costReport.cost.totals.calls} model call(s), ${costReport.cost.totals.total_tokens} tokens, against the granted budgets in the bars above.</div>
         <div class="muted">${esc(costReport.usage_label)}. Priced under price table ${(costReport.price_tables_recorded || []).map(t => `v${t.version}`).join(", ") || "—"} (current table: v${costReport.price_table_current ? costReport.price_table_current.version : "—"}); the recorded lines stand under the version that priced them — a newer table re-prices nothing here.</div>
         ${[["By phase", costReport.cost.by_phase], ["By sub-agent role", costReport.cost.by_role], ["By model", costReport.cost.by_model]].map(([title, buckets]) => buckets && Object.keys(buckets).length ? `<div class="muted" style="margin-top:8px">${title}</div>` + Object.entries(buckets).map(([k, b]) => `<div class="finding"><strong>${esc(k)}</strong> — ${b.calls} call(s) · ${b.total_tokens} tokens (${b.input_tokens} in / ${b.output_tokens} out${b.other_tokens ? ` / ${b.other_tokens} other` : ""}) — <strong>$${Number(b.cost_usd || 0).toFixed(6)}</strong>${b.usage_basis && b.usage_basis !== "measured" ? ` · ${esc(b.usage_basis)}` : ""}${b.unpriced_tokens ? ` · ${b.unpriced_tokens} tokens unpriced (no table entry)` : ""}</div>`).join("") : "").join("")}` : ""}
-        ${c.status === "BUDGET_EXHAUSTED" ? `
+        ${canAmend ? `
         <h3 style="margin-top:14px">Amend the budget</h3>
-        <p class="muted" style="margin-top:0">Raise the caps and the case returns to APPROVED for re-execution. The exhaustion and this amendment stay in the ledger. No cap may be set below what the case has already consumed. Leave a phase field blank to inherit the flat value.</p>
+        <p class="muted" style="margin-top:0">${planningStopped ? "Planning stopped on its budget before a plan was written. Raise the caps, then run planning again." : "Raise the caps and the case returns to APPROVED for re-execution."} The exhaustion and this amendment stay in the ledger. No cap may be set below what the case has already consumed. Leave a phase field blank to inherit the flat value.</p>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
           <label class="muted">Execution steps <input id="am-e-steps" type="number" value="${(c.brief.budget.execution && c.brief.budget.execution.max_steps) || c.brief.budget.max_steps}"></label>
           <label class="muted">Execution tokens <input id="am-e-tokens" type="number" value="${(c.brief.budget.execution && c.brief.budget.execution.max_tokens) || c.brief.budget.max_tokens}"></label>
@@ -473,7 +479,7 @@ async function openCase(caseId) {
         </div>
         <div class="row" style="margin-top:8px">
           <input id="am-reason" type="text" placeholder="Reason for the amendment (recorded, required)" style="flex:1">
-          <button id="act-amend" class="secondary">Amend budget &amp; re-approve</button>
+          <button id="act-amend" class="secondary">${planningStopped ? "Amend budget" : "Amend budget &amp; re-approve"}</button>
         </div>` : ""}
       </div>
       <div class="panel"><h3>Plan ${plan ? `(v${plan.version}, ${esc(plan.status)})` : ""}</h3>
@@ -630,7 +636,7 @@ async function openCase(caseId) {
       <p class="muted" style="margin-top:0">A document that arrived after intake. It is stored with its hash like any evidence; if the case already has a plan, the workstreams it speaks to are marked stale (above) until an analyst decides.</p>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">
         <input id="ev-title" type="text" placeholder="Document title">
-        <input id="ev-source" type="text" placeholder="Source label (e.g. Trade coverage)">
+        <select id="ev-source" title="Evidence must name a source in the governed registry">${registry.length ? registry.map(s => `<option value="${esc(s.name)}">${esc(s.name)} (${esc(s.kind)})</option>`).join("") : '<option value="">No registered sources</option>'}</select>
         <input id="ev-kind" type="text" placeholder="Kind (filing, news, product, ...)">
         <input id="ev-date" type="text" placeholder="Date (YYYY-MM-DD)">
       </div>

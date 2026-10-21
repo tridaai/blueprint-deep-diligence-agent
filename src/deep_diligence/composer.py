@@ -65,7 +65,13 @@ from __future__ import annotations
 
 from .ledger import build_ledger
 from .objects import ObjectStore
-from .report_model import build_report_model, render_html, skill_lines, staleness_lines
+from .report_model import (
+    DRAFT_STATUS_LINE,
+    build_report_model,
+    render_html,
+    skill_lines,
+    staleness_lines,
+)
 from .store import Store, utcnow
 
 
@@ -259,7 +265,7 @@ def _render_markdown(
     lines = [
         f"# Diligence report — {brief['subject']}",
         "",
-        "Status: DRAFT — not final until an analyst approves it.",
+        DRAFT_STATUS_LINE,
         f"Commissioned by: {brief['analyst']}. "
         f"Evidence in scope: {evidence_count} documents.",
         "",

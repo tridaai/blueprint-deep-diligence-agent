@@ -14,6 +14,7 @@ a GateError — the plan gate is enforced here, in code, not by prompt.
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import re
@@ -61,7 +62,12 @@ from .observability import build_trace, classify_case_outcome, fold_digest
 from .portfolio import build_portfolio, member_cases, summarize_portfolio
 from .profiles import ProfileError, load_profile
 from .promotion import ProfileGate
-from .report_model import export_report, model_sections
+from .report_model import (
+    DRAFT_STATUS_LINE,
+    export_report,
+    final_status_line,
+    model_sections,
+)
 from .schedule import build_handoff, plan_defects, waves, workstream_dependencies
 from .skills import (
     SkillError,
@@ -520,7 +526,10 @@ class CaseService:
         )
         if error is not None:
             self.store.add_audit(case_id, "planning_budget_exceeded", usage)
-            raise GateError(f"planning stopped on the {error.kind} budget")
+            raise GateError(
+                f"planning stopped on the {error.kind} budget; amend the "
+                "budget to re-plan"
+            )
         raw = backend.read_text_direct("/plan.json")
         if raw is None:
             raise GateError("the planning run produced no /plan.json")
@@ -2031,7 +2040,9 @@ class CaseService:
         lie. Caps at or above consumption are the analyst's call.
         """
         case = self._require_case(case_id)
-        if case["status"] != "BUDGET_EXHAUSTED":
+        if case["status"] != "BUDGET_EXHAUSTED" and not self._planning_stopped(
+            case
+        ):
             raise GateError(
                 "budget amendment requires a budget-exhausted case "
                 f"(status {case['status']})"
@@ -2086,7 +2097,28 @@ class CaseService:
         log.info(
             "case %s budget amended by %s: %s", case_id, analyst, reason
         )
-        return self.store.update_case(case_id, brief=brief, status="APPROVED")
+        # An exhausted execution returns to APPROVED for re-execution;
+        # a planning run that stopped on its budget leaves the case
+        # where it was (INTAKE or PLAN_REJECTED), ready to re-plan.
+        status = (
+            "APPROVED" if case["status"] == "BUDGET_EXHAUSTED" else case["status"]
+        )
+        return self.store.update_case(case_id, brief=brief, status=status)
+
+    def _planning_stopped(self, case: dict) -> bool:
+        """True when the case's most recent planning outcome is a
+        budget stop — no plan was minted and no amendment has been
+        recorded since. Planning exhaustion leaves no draft, so the
+        case never reaches BUDGET_EXHAUSTED; this is what lets the
+        analyst amend it instead of re-planning into the same cap."""
+        if case["status"] not in ("INTAKE", "PLAN_REJECTED"):
+            return False
+        for entry in reversed(self.store.list_audit(case["case_id"])):
+            if entry["event"] == "planning_budget_exceeded":
+                return True
+            if entry["event"] in ("plan_generated", "budget_amended"):
+                return False
+        return False
 
     # -- cost accounting --------------------------------------------------------
     def cost_report(self, case_id: str) -> dict:
@@ -2631,6 +2663,21 @@ class CaseService:
         if case["status"] not in ("DRAFT_READY", "BUDGET_EXHAUSTED"):
             raise GateError(f"no report awaiting decision (status {case['status']})")
         report = self.store.get_report(case_id)
+        if approve and case.get("stale_marks"):
+            # Staleness gate: evidence that arrived while the draft
+            # was at the gate marked workstreams stale. Staleness is
+            # decided, never silent — the analyst proceeds (recorded,
+            # and rendered into the report's limits) or re-plans
+            # before the report may become final.
+            stale = ", ".join(
+                sorted({m["question_id"] for m in case["stale_marks"]})
+            )
+            raise GateError(
+                "new evidence arrived after planning and these "
+                f"workstreams are marked stale: {stale}. An analyst "
+                "must re-plan or record a decision to proceed before "
+                "the report can be approved"
+            )
         if approve:
             # Citation integrity at the gate: re-verify the ledger
             # against the evidence store before this report may become
@@ -2717,6 +2764,22 @@ class CaseService:
         report["status"] = "APPROVED" if approve else "REJECTED"
         report["decided_by"] = analyst
         report["decision_note"] = note
+        if approve:
+            # The approved report must not read as a draft: swap the
+            # status line in every stored format (markdown, HTML,
+            # model). Nothing else in the report changes at the gate.
+            final_line = final_status_line(analyst, utcnow()[:10])
+            report["markdown"] = report["markdown"].replace(
+                DRAFT_STATUS_LINE, final_line, 1
+            )
+            if report.get("html"):
+                report["html"] = report["html"].replace(
+                    html.escape(DRAFT_STATUS_LINE, quote=True),
+                    html.escape(final_line, quote=True),
+                    1,
+                )
+            if report.get("model"):
+                report["model"] = {**report["model"], "status": "APPROVED"}
         self.store.save_report(case_id, report)
         audit_payload: dict = {"analyst": analyst, "note": note}
         if approve and report.get("coverage_detail"):

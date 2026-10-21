@@ -154,6 +154,42 @@ def test_planning_phase_cap_trips_planning(service, gold_brief):
     assert service.store.get_case(case["case_id"])["status"] == "INTAKE"
 
 
+def test_planning_exhaustion_can_be_amended_and_replanned(service, gold_brief):
+    # Planning that stops on its cap writes no plan and no draft, so
+    # the case never reaches BUDGET_EXHAUSTED. Without an amendment
+    # path it would re-plan into the same cap forever.
+    brief = BriefIn(
+        **{
+            **gold_brief,
+            "budget": {**gold_brief["budget"], "planning": {"max_steps": 2}},
+        }
+    )
+    case_id = service.create_case(brief)["case_id"]
+    with pytest.raises(GateError, match="amend"):
+        service.run_planning(case_id)
+    amended = service.amend_budget(
+        case_id,
+        analyst="Tester",
+        reason="Planning needs more than two steps",
+        budget=BudgetIn(
+            **{**gold_brief["budget"], "planning": {"max_steps": 120}}
+        ),
+    )
+    # Back to where planning starts, not to APPROVED: there is no plan.
+    assert amended["status"] == "INTAKE"
+    plan = service.run_planning(case_id)
+    assert plan["version"] == 1
+    assert service.store.get_case(case_id)["status"] == "PLAN_READY"
+    # Once a plan exists the planning stop is behind it.
+    with pytest.raises(GateError, match="budget-exhausted"):
+        service.amend_budget(
+            case_id,
+            analyst="Tester",
+            reason="Again",
+            budget=BudgetIn(**gold_brief["budget"]),
+        )
+
+
 # -- the budget ledger ----------------------------------------------------------
 
 

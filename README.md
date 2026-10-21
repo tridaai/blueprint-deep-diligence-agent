@@ -191,7 +191,9 @@ is accountable for lives in our code around it:
   coverage table it approved) or **amend the budget**: a recorded
   raise, never below what the case has already consumed, that
   returns the case to APPROVED for re-execution while the original
-  exhaustion stays in the ledger.
+  exhaustion stays in the ledger. A planning run that stops on
+  its cap writes no plan, so its amendment leaves the case where it
+  was, ready to re-plan.
 - **Cost accounting: what a case cost, priced in code.** The same
   guard records every model call as it ends — phase, role (the
   main agent, or financial-scan / product-scan / market-scan),

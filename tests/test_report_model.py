@@ -541,3 +541,24 @@ def test_section_notes_over_http(client: TestClient, service):
         exported["annotations"]["risks_and_open_items"][0]["text"]
         == "Updated view."
     )
+
+
+def test_approved_report_no_longer_reads_as_a_draft(service):
+    case_id, report = _run_to_draft(service, HELVION)
+    assert "Status: DRAFT" in report["markdown"]
+    assert "Status: DRAFT" in report["html"]
+    service.decide_report(case_id, "Desk Lead", True)
+    final = service.store.get_report(case_id)
+    for text in (final["markdown"], final["html"]):
+        assert "Status: DRAFT" not in text
+        assert "Status: FINAL — approved by Desk Lead on" in text
+    assert final["model"]["status"] == "APPROVED"
+    assert service.report_export(case_id)["status"] == "APPROVED"
+    # The swap is the status line only; the body is untouched.
+    assert final["markdown"].split("\n", 3)[3] == report["markdown"].split("\n", 3)[3]
+
+
+def test_rejected_report_keeps_its_draft_status(service):
+    case_id, _ = _run_to_draft(service, HELVION)
+    service.decide_report(case_id, "Desk Lead", False, "redo")
+    assert "Status: DRAFT" in service.store.get_report(case_id)["markdown"]
