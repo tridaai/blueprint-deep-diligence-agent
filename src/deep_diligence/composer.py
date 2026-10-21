@@ -136,7 +136,18 @@ def coverage_detail_for(
     clean run carries none, exactly as reports always have.
     """
     statuses = workstream_status or []
-    if not partial and all(s["status"] == "completed" for s in statuses):
+    # Clean means every brief question had a workstream that ran to
+    # completion — not merely that no recorded workstream went
+    # wrong: a question the execution record never mentions is
+    # uncovered too, and an empty record proves nothing at all.
+    completed = {
+        s["question_id"] for s in statuses if s["status"] == "completed"
+    }
+    if (
+        not partial
+        and all(s["status"] == "completed" for s in statuses)
+        and all(q["id"] in completed for q in brief["questions"])
+    ):
         return None
     return question_coverage(brief, claims, interrupted_questions, statuses)
 

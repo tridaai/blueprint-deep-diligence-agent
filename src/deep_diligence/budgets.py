@@ -51,6 +51,9 @@ PHASES = ("planning", "execution")
 
 WORKSTREAM_ROLES = ("financial-scan", "product-scan", "market-scan")
 _WORKSTREAM_SYSTEM = re.compile(r"WORKSTREAM:\s*([a-z][a-z0-9-]*)")
+# A spawn's question id, as the execute prompt's block format
+# prints it (the brief's question id pattern, models.QuestionIn).
+_WORKSTREAM_ID = re.compile(r"WORKSTREAM_ID:\s*([a-z][a-z0-9_-]{0,31})")
 
 BUDGET_EVENTS = (
     "budget_granted",
@@ -144,6 +147,11 @@ class BudgetGuard(BaseCallbackHandler):
         # the workstreams the run stopped inside.
         self._open_tasks: dict[str, int] = {}
         self.interrupted_spawns: list[int] = []
+        # The workstream each `task` spawn was for, read from the
+        # WORKSTREAM_ID line of its description, in spawn order. A
+        # spawn whose description carries no such line is counted
+        # in `subagents` but attributed to nothing here.
+        self.spawned_workstreams: list[str] = []
 
     # -- helpers ------------------------------------------------------------
     def _wall_elapsed(self) -> float:
@@ -300,6 +308,12 @@ class BudgetGuard(BaseCallbackHandler):
             run_id = str(kwargs.get("run_id") or "")
             if run_id:
                 self._open_tasks[run_id] = self.subagents
+            inputs = kwargs.get("inputs")
+            match = _WORKSTREAM_ID.search(
+                str(inputs) if inputs is not None else input_str or ""
+            )
+            if match:
+                self.spawned_workstreams.append(match.group(1))
             self.audit_sink.append(
                 (
                     "subagent_spawned",
@@ -335,6 +349,7 @@ class BudgetGuard(BaseCallbackHandler):
             "wall_seconds": round(time.monotonic() - self.started, 2),
             "exceeded": self.exceeded,
             "interrupted_spawns": list(self.interrupted_spawns),
+            "spawned_workstreams": list(self.spawned_workstreams),
             # The per-call consumption records cost accounting
             # prices (costs.py). Their token totals sum to this
             # usage's `tokens` — one recording, two ledgers.

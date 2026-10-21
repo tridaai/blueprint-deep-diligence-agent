@@ -6,9 +6,11 @@ needs the product facts first, say. The declaration lives on the
 plan artifact, and the rules around it live here, in code — not in
 the planner's prompt:
 
-- VALIDATION (the plan gate): an unknown dependency, a workstream
-  depending on itself, or a dependency cycle refuses plan approval,
-  with the defect named. A plan with no dependencies validates
+- VALIDATION (the plan gate): a malformed plan (no workstreams
+  list, an entry without a question id, a workstream outside the
+  profile's roster, a brief question left unplanned), an unknown
+  dependency, a workstream depending on itself, or a dependency
+  cycle refuses plan approval, with the defect named. A plan with no dependencies validates
   trivially and executes exactly as plans always have.
 - SCHEDULING: execution runs in topological waves computed here.
   Wave 1 is every workstream with no unmet dependencies; a
@@ -33,6 +35,69 @@ def workstream_dependencies(entry: dict) -> list[str]:
     """The question ids one plan workstream declares it depends on."""
     deps = entry.get("depends_on") or []
     return [str(d) for d in deps]
+
+
+def plan_shape_defects(
+    plan_doc, brief_questions: list[dict], roster: list[str]
+) -> list[str]:
+    """Every defect in the plan artifact's shape, named — checked
+    before the dependency graph, because the graph checks assume a
+    well-formed plan.
+
+    The planner is a model, and a model can write a plan that is
+    valid JSON but not a plan: the workstreams under another key,
+    an entry without a question id, a workstream the profile's
+    roster cannot spawn, or a brief question no workstream answers.
+    Each of those must stop at the gate, worded for the analyst who
+    sends the plan back — never approve into an execution that
+    silently answers nothing, and never crash the gate.
+    """
+    if not isinstance(plan_doc, dict):
+        return ["the plan is not a JSON object"]
+    workstreams = plan_doc.get("workstreams")
+    if not isinstance(workstreams, list):
+        return ["the plan has no 'workstreams' list"]
+    defects: list[str] = []
+    for index, entry in enumerate(workstreams, start=1):
+        if not isinstance(entry, dict):
+            defects.append(f"workstream entry {index} is not an object")
+            continue
+        qid = entry.get("question_id")
+        if not isinstance(qid, str) or not qid:
+            defects.append(f"workstream entry {index} has no question_id")
+            continue
+        name = entry.get("workstream")
+        if name not in roster:
+            defects.append(
+                f"workstream {qid} names {name!r}, which is not a "
+                f"sub-agent in the active profile ({', '.join(roster)})"
+            )
+        for field in ("depends_on", "keywords"):
+            value = entry.get(field)
+            if value is not None and not (
+                isinstance(value, list)
+                and all(isinstance(item, str) for item in value)
+            ):
+                defects.append(
+                    f"workstream {qid} has a {field} that is not a "
+                    "list of strings"
+                )
+        if not isinstance(entry.get("skills", []), list):
+            defects.append(f"workstream {qid} has a skills that is not a list")
+    if defects:
+        return defects
+    brief_ids = [q["id"] for q in brief_questions]
+    planned = {entry["question_id"] for entry in workstreams}
+    for qid in sorted(planned - set(brief_ids)):
+        defects.append(
+            f"workstream {qid} is not a question in the brief"
+        )
+    for qid in brief_ids:
+        if qid not in planned:
+            defects.append(
+                f"the plan has no workstream for brief question {qid}"
+            )
+    return defects
 
 
 def plan_defects(workstreams: list[dict]) -> list[str]:

@@ -68,7 +68,13 @@ from .report_model import (
     final_status_line,
     model_sections,
 )
-from .schedule import build_handoff, plan_defects, waves, workstream_dependencies
+from .schedule import (
+    build_handoff,
+    plan_defects,
+    plan_shape_defects,
+    waves,
+    workstream_dependencies,
+)
 from .skills import (
     SkillError,
     plan_skill_pins,
@@ -114,6 +120,9 @@ def _aggregate_execution_usage(
         ),
         "exceeded": (tripped or {}).get("exceeded"),
         "interrupted_spawns": (tripped or {}).get("interrupted_spawns", []),
+        "spawned_workstreams": [
+            qid for u in usages for qid in u.get("spawned_workstreams", [])
+        ],
     }
     return total
 
@@ -554,6 +563,21 @@ class CaseService:
         log.info("case %s plan v%d ready", case_id, plan["version"])
         return plan
 
+    def _plan_gate_defects(self, case: dict, plan: dict) -> list[str]:
+        """Every reason this plan cannot be scheduled, named: its
+        shape against the brief and the active profile's roster
+        first, then — on a well-formed plan — its dependency
+        graph."""
+        plan_doc = plan.get("plan")
+        defects = plan_shape_defects(
+            plan_doc,
+            case["brief"]["questions"],
+            [entry.name for entry in self.profile.subagents],
+        )
+        if defects:
+            return defects
+        return plan_defects(plan_doc["workstreams"])
+
     def decide_plan(self, case_id: str, analyst: str, approve: bool, note: str = "") -> dict:
         case = self._require_case(case_id)
         if case["status"] != "PLAN_READY":
@@ -561,17 +585,18 @@ class CaseService:
         plan = self.store.get_plan(case_id)
         pins: dict[str, list[dict]] = {}
         if approve:
-            # The plan gate checks the dependency graph in code
-            # (schedule.py): an unknown dependency or a cycle means
-            # the plan cannot be scheduled, so it cannot be approved
-            # either. The defect is named, and the plan stays at the
-            # gate for the analyst to send back.
-            workstreams = (plan.get("plan") or {}).get("workstreams", [])
-            defects = plan_defects(workstreams)
+            # The plan gate checks the plan's shape and dependency
+            # graph in code (schedule.py): a malformed plan, an
+            # unknown dependency, or a cycle means the plan cannot
+            # be scheduled, so it cannot be approved either. The
+            # defect is named, and the plan stays at the gate for
+            # the analyst to send back.
+            defects = self._plan_gate_defects(case, plan)
             if defects:
                 raise GateError(
                     "plan cannot be approved: " + "; ".join(defects)
                 )
+            workstreams = plan["plan"]["workstreams"]
             # The skill gate rides the same approval (skills.py):
             # every skill the plan names must be in the library,
             # must apply to the workstream's role, and must stay
@@ -630,15 +655,14 @@ class CaseService:
                 "proceed before execution"
             )
         plan = self.store.get_plan(case_id)
-        plan_doc = plan.get("plan") or {}
-        workstreams = plan_doc.get("workstreams", [])
-        # Defence in depth: the plan gate validated this graph at
-        # approval, and an unschedulable graph must still never run.
-        defects = plan_defects(workstreams)
+        # Defence in depth: the plan gate validated this plan at
+        # approval, and an unschedulable plan must still never run.
+        defects = self._plan_gate_defects(case, plan)
         if defects:
             raise GateError(
                 "plan cannot be executed: " + "; ".join(defects)
             )
+        workstreams = plan["plan"]["workstreams"]
         skip = self._reuse_skip(case, workstreams)
         backend = self._backend(case_id)
         backend.delete_direct("/execution/notes.md")
@@ -1045,7 +1069,7 @@ class CaseService:
         plan = self.store.get_plan(case_id)
         if plan is None:
             raise GateError("the interrupted case has no plan to resume")
-        defects = plan_defects((plan.get("plan") or {}).get("workstreams", []))
+        defects = self._plan_gate_defects(case, plan)
         if defects:
             raise GateError(
                 "plan cannot be executed: " + "; ".join(defects)
@@ -1177,6 +1201,14 @@ class CaseService:
             if 1 <= i <= len(order)
         ]
         interrupted_ids = set(interrupted)
+        # Which workstreams the run actually spawned, from the guard's
+        # record. "Ran and found nothing" is only a claim the record
+        # can make when every spawn is attributed to a workstream; a
+        # spawn it cannot attribute leaves the label at empty, never
+        # guessing which workstream went unspawned.
+        spawned = usage.get("spawned_workstreams") or []
+        spawned_ids = set(spawned)
+        spawns_attributed = usage.get("subagents", 0) <= len(spawned)
         counts: dict[str, int] = {}
         for finding in self.store.list_findings(case_id):
             counts[finding["question_id"]] = (
@@ -1224,6 +1256,17 @@ class CaseService:
                     "reason": (
                         "the run stopped on its budget before this "
                         "workstream was spawned"
+                    ),
+                }
+            elif spawns_attributed and qid not in spawned_ids:
+                status = {
+                    "question_id": qid,
+                    "workstream": entry["workstream"],
+                    "status": "not_run",
+                    "findings": 0,
+                    "reason": (
+                        "the run ended without spawning this "
+                        "workstream's sub-agent"
                     ),
                 }
             else:

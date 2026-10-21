@@ -16,7 +16,8 @@ from deep_diligence.composer import compose_report
 from deep_diligence.config import load_settings
 from deep_diligence.corpus import DEPENDENCY_CASES
 from deep_diligence.models import BriefIn
-from deep_diligence.schedule import plan_defects, waves
+from deep_diligence.composer import coverage_detail_for
+from deep_diligence.schedule import plan_defects, plan_shape_defects, waves
 from deep_diligence.service import CaseService, GateError
 
 VERDANT = DEPENDENCY_CASES[0]["brief"]
@@ -158,6 +159,204 @@ def test_a_valid_dependency_plan_approves(service):
 
 
 # -- scheduled execution --------------------------------------------------------
+
+
+# -- the plan's shape (a model can write valid JSON that is not a plan) -----
+
+ROSTER = ["financial-scan", "product-scan", "market-scan"]
+
+
+def _verdant_ws(qid, **overrides):
+    names = {q["id"]: q["workstream"] for q in VERDANT["questions"]}
+    entry = {
+        "question_id": qid,
+        "workstream": names.get(qid, "financial-scan"),
+        "objective": "x",
+        "keywords": ["revenue"],
+        "depends_on": [],
+    }
+    entry.update(overrides)
+    return entry
+
+
+MALFORMED_PLANS = {
+    "workstreams-under-another-key": (
+        {"questions": [_verdant_ws("q1")]},
+        "the plan has no 'workstreams' list",
+    ),
+    "plan-is-a-list": (
+        [_verdant_ws("q1")],
+        "the plan is not a JSON object",
+    ),
+    "entry-without-question-id": (
+        {"workstreams": [{"workstream": "product-scan", "objective": "x"}]},
+        "workstream entry 1 has no question_id",
+    ),
+    "workstream-outside-the-roster": (
+        {"workstreams": [
+            _verdant_ws("q1", workstream="Product Analysis"),
+            _verdant_ws("q2"),
+            _verdant_ws("q3"),
+        ]},
+        "workstream q1 names 'Product Analysis', which is not a sub-agent",
+    ),
+    "depends-on-as-a-string": (
+        {"workstreams": [
+            _verdant_ws("q1"),
+            _verdant_ws("q2", depends_on="q1"),
+            _verdant_ws("q3"),
+        ]},
+        "workstream q2 has a depends_on that is not a list of strings",
+    ),
+    "question-not-in-the-brief": (
+        {"workstreams": [
+            _verdant_ws("q1"), _verdant_ws("q2"), _verdant_ws("q3"),
+            _verdant_ws("q9"),
+        ]},
+        "workstream q9 is not a question in the brief",
+    ),
+    "brief-question-left-unplanned": (
+        {"workstreams": [_verdant_ws("q1"), _verdant_ws("q3")]},
+        "the plan has no workstream for brief question q2",
+    ),
+    "no-workstreams-at-all": (
+        {"workstreams": []},
+        "the plan has no workstream for brief question q1",
+    ),
+}
+
+
+@pytest.mark.parametrize("label", sorted(MALFORMED_PLANS))
+def test_plan_shape_defects_name_each_malformation(label):
+    plan_doc, expected = MALFORMED_PLANS[label]
+    defects = plan_shape_defects(plan_doc, VERDANT["questions"], ROSTER)
+    assert any(expected in d for d in defects), defects
+
+
+def test_a_well_formed_plan_has_no_shape_defects():
+    plan_doc = {"workstreams": [_verdant_ws(q["id"]) for q in VERDANT["questions"]]}
+    assert plan_shape_defects(plan_doc, VERDANT["questions"], ROSTER) == []
+
+
+@pytest.mark.parametrize("label", sorted(MALFORMED_PLANS))
+def test_the_gate_refuses_a_malformed_plan_by_name(service, label):
+    plan_doc, expected = MALFORMED_PLANS[label]
+    case, _ = _case_with_plan(service, plan_doc)
+    with pytest.raises(GateError) as refused:
+        service.decide_plan(case["case_id"], analyst="Tester", approve=True)
+    assert "plan cannot be approved" in str(refused.value)
+    assert expected in str(refused.value)
+    assert service.store.get_case(case["case_id"])["status"] == "PLAN_READY"
+    # Sending it back is still open to the analyst.
+    service.decide_plan(case["case_id"], analyst="Tester", approve=False)
+    assert service.store.get_case(case["case_id"])["status"] == "PLAN_REJECTED"
+
+
+@pytest.mark.parametrize(
+    "label", ["plan-is-a-list", "entry-without-question-id"]
+)
+def test_a_malformed_plan_is_a_409_not_a_server_error(settings, label):
+    service = CaseService(settings)
+    case, _ = _case_with_plan(service, MALFORMED_PLANS[label][0])
+    client = TestClient(create_app(settings))
+    response = client.post(
+        f"/api/cases/{case['case_id']}/plan/decision",
+        json={"analyst": "Tester", "approve": True, "note": ""},
+    )
+    assert response.status_code == 409
+    assert MALFORMED_PLANS[label][1] in response.json()["detail"]
+
+
+def test_coverage_is_reported_for_a_question_the_record_never_mentions():
+    brief = {"questions": VERDANT["questions"]}
+    claims = [{"question_id": "q1"}, {"question_id": "q3"}]
+    # q2 has no workstream status at all: the run is not clean.
+    statuses = [
+        {"question_id": "q1", "status": "completed"},
+        {"question_id": "q3", "status": "completed"},
+    ]
+    detail = coverage_detail_for(
+        brief, claims, partial=False, workstream_status=statuses
+    )
+    assert detail is not None
+    rows = {r["question_id"]: r["status"] for r in detail}
+    assert rows["q2"] == "NOT COVERED"
+    # An empty execution record proves nothing either.
+    detail = coverage_detail_for(
+        brief, [], partial=False, workstream_status=[]
+    )
+    assert [r["status"] for r in detail] == ["NOT COVERED"] * 3
+
+
+def test_a_clean_run_still_carries_no_coverage_table():
+    brief = {"questions": VERDANT["questions"]}
+    claims = [{"question_id": q["id"]} for q in VERDANT["questions"]]
+    statuses = [
+        {"question_id": q["id"], "status": "completed"}
+        for q in VERDANT["questions"]
+    ]
+    assert coverage_detail_for(
+        brief, claims, partial=False, workstream_status=statuses
+    ) is None
+
+
+def _run_without_spawns(service, case_id, monkeypatch, subagents=0):
+    """Execute with a model that ends the run without spawning a
+    single workstream (what llama3.1 did live), or with spawns the
+    guard could not attribute to any workstream."""
+    original = service._run_agent
+
+    def no_spawns(case_, message, phase):
+        if phase != "execution":
+            return original(case_, message, phase)
+        return {
+            "phase": "execution", "steps": 1, "subagents": subagents,
+            "tokens": 0, "tool_calls": subagents, "wall_seconds": 0.0,
+            "exceeded": None, "interrupted_spawns": [],
+            "spawned_workstreams": [],
+        }, None
+
+    monkeypatch.setattr(service, "_run_agent", no_spawns)
+    return service.run_execution(case_id)
+
+
+def test_a_workstream_never_spawned_reads_not_run(service, case, monkeypatch):
+    case_id = case["case_id"]
+    service.run_planning(case_id)
+    service.decide_plan(case_id, analyst="Tester", approve=True)
+    report = _run_without_spawns(service, case_id, monkeypatch)
+    for status in report["workstreams"]:
+        assert status["status"] == "not_run"
+        assert status["reason"] == (
+            "the run ended without spawning this workstream's sub-agent"
+        )
+    assert {r["status"] for r in report["coverage_detail"]} == {"NOT COVERED"}
+    finished = [
+        e["payload"]["status"]
+        for e in service.store.list_audit(case_id)
+        if e["event"] == "workstream_finished"
+    ]
+    assert finished == ["not_run"] * len(report["workstreams"])
+
+
+def test_an_unattributed_spawn_never_guesses_not_run(
+    service, case, monkeypatch
+):
+    case_id = case["case_id"]
+    service.run_planning(case_id)
+    service.decide_plan(case_id, analyst="Tester", approve=True)
+    report = _run_without_spawns(service, case_id, monkeypatch, subagents=1)
+    assert {s["status"] for s in report["workstreams"]} == {"empty"}
+
+
+def test_the_guard_attributes_each_spawn_to_its_workstream(service, case):
+    case_id = case["case_id"]
+    service.run_planning(case_id)
+    service.decide_plan(case_id, analyst="Tester", approve=True)
+    service.run_execution(case_id)
+    usage = service.store.get_case(case_id)["usage"]["execution"]
+    assert usage["subagents"] == 3
+    assert sorted(usage["spawned_workstreams"]) == ["q1", "q2", "q3"]
 
 
 def _run_verdant(service):
