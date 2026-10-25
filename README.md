@@ -36,7 +36,9 @@ fictional.
 > Reference prototype. Not connected to any real firm, data provider,
 > or client system.
 
-> **Work in progress** — this blueprint is built and passing its automated test and eval gates, but it has not yet finished hands-on local testing, and its companion blog post is not yet published. Expect changes. This notice comes off when both are done.
+<p><a href="https://trida.ai/blog/deep-diligence-agent-blueprint"><img src="https://geeytzpdwvjojoie.public.blob.vercel-storage.com/blog/1792756696123-cover.webp" alt="Deep Diligence Agent Blueprint" width="600"></a></p>
+
+**Deep-dive:** [Deep Diligence Agent Blueprint](https://trida.ai/blog/deep-diligence-agent-blueprint) — how the agent works, where it stops, and what the evals actually prove.
 
 ## Run it with a real model
 
